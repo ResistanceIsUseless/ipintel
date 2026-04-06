@@ -1,0 +1,95 @@
+package lookup
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"sync"
+	"time"
+
+	"github.com/mgriffiths/ipintel/internal/config"
+)
+
+// Engine orchestrates all providers and runs lookups.
+type Engine struct {
+	cfg       *config.Config
+	providers []Provider
+	timeout   time.Duration
+}
+
+// NewEngine creates a lookup engine with all configured providers.
+func NewEngine(cfg *config.Config) *Engine {
+	e := &Engine{
+		cfg:     cfg,
+		timeout: 30 * time.Second,
+	}
+
+	// Always-on (free) providers
+	e.providers = append(e.providers, NewReverseDNS())
+	e.providers = append(e.providers, NewRDAP())
+	e.providers = append(e.providers, NewCloudDetector())
+	e.providers = append(e.providers, NewCrtSh())
+
+	// API-key providers
+	if cfg.HasGreyNoise() {
+		e.providers = append(e.providers, NewGreyNoise(cfg.GreyNoiseAPIKey))
+	}
+	if cfg.HasAbuseIPDB() {
+		e.providers = append(e.providers, NewAbuseIPDB(cfg.AbuseIPDBAPIKey))
+	}
+	if cfg.HasShodan() {
+		e.providers = append(e.providers, NewShodan(cfg.ShodanAPIKey))
+	}
+
+	return e
+}
+
+// Run executes all providers concurrently and returns the aggregated result.
+func (e *Engine) Run(ctx context.Context, ipStr string) (*Result, error) {
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return nil, fmt.Errorf("invalid IP address: %s", ipStr)
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, e.timeout)
+	defer cancel()
+
+	result := &Result{
+		IP:        ipStr,
+		Timestamp: time.Now().UTC(),
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for _, p := range e.providers {
+		wg.Add(1)
+		go func(prov Provider) {
+			defer wg.Done()
+			if err := prov.Lookup(ctx, ip); err != nil {
+				mu.Lock()
+				result.Errors = append(result.Errors, ProviderError{
+					Provider: prov.Name(),
+					Error:    err.Error(),
+				})
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			prov.Apply(result)
+			mu.Unlock()
+		}(p)
+	}
+
+	wg.Wait()
+	return result, nil
+}
+
+// ProviderNames returns a list of active provider names.
+func (e *Engine) ProviderNames() []string {
+	names := make([]string, len(e.providers))
+	for i, p := range e.providers {
+		names[i] = p.Name()
+	}
+	return names
+}

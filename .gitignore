@@ -1,0 +1,11 @@
+.DS_Store
+.env
+.envrc
+./tmp/
+tmp/
+*.exe
+ipintel
+dist/
+.idea/
+.vscode/
+*.log
