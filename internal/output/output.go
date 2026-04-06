@@ -876,7 +876,7 @@ func renderAzureTenant(az *lookup.AzureTenantResult) string {
 
 	if !az.Found {
 		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(
-			dimStyle.Render(fmt.Sprintf("Not found in subscription %s", az.SubscriptionID)),
+			dimStyle.Render("Not found in any accessible Azure subscription"),
 		))
 		sb.WriteString("\n")
 		return sb.String()
@@ -926,7 +926,7 @@ func renderAWSTenant(aw *lookup.AWSTenantResult) string {
 
 	if !aw.Found {
 		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(
-			dimStyle.Render(fmt.Sprintf("Not found in region %s", aw.Region)),
+			dimStyle.Render("Not found in any accessible AWS account/region"),
 		))
 		sb.WriteString("\n")
 		return sb.String()
@@ -937,14 +937,19 @@ func renderAWSTenant(aw *lookup.AWSTenantResult) string {
 	sb.WriteString("\n\n")
 
 	rows := [][]string{}
+	if aw.AccountName != "" {
+		rows = append(rows, []string{"Account", fmt.Sprintf("%s (%s)", aw.AccountName, aw.AccountID)})
+	} else if aw.AccountID != "" {
+		rows = append(rows, []string{"Account", aw.AccountID})
+	}
 	if aw.Region != "" {
 		rows = append(rows, []string{"Region", aw.Region})
 	}
-	if aw.AccountID != "" {
-		rows = append(rows, []string{"Account", aw.AccountID})
-	}
 	if aw.ResourceType != "" {
 		rows = append(rows, []string{"Resource Type", aw.ResourceType})
+	}
+	if aw.ResourceName != "" {
+		rows = append(rows, []string{"Resource Name", aw.ResourceName})
 	}
 	if aw.IPType != "" {
 		rows = append(rows, []string{"IP Type", aw.IPType})

@@ -285,7 +285,9 @@ type AzureTenantResult struct {
 type AWSTenantResult struct {
 	Found              bool   `json:"found"`
 	Region             string `json:"region,omitempty"`
-	IPType             string `json:"ip_type,omitempty"` // "Elastic IP" or "Ephemeral"
+	AccountID          string `json:"account_id,omitempty"`
+	AccountName        string `json:"account_name,omitempty"` // SSO account display name
+	IPType             string `json:"ip_type,omitempty"`      // "Elastic IP" or "Ephemeral"
 	PublicIP           string `json:"public_ip,omitempty"`
 	PrivateIP          string `json:"private_ip,omitempty"`
 	InstanceID         string `json:"instance_id,omitempty"`
@@ -293,8 +295,8 @@ type AWSTenantResult struct {
 	AllocationID       string `json:"allocation_id,omitempty"`
 	AssociationID      string `json:"association_id,omitempty"`
 	ResourceType       string `json:"resource_type,omitempty"` // EC2, NAT Gateway, NLB, etc.
+	ResourceName       string `json:"resource_name,omitempty"` // Name tag value
 	Description        string `json:"description,omitempty"`
-	AccountID          string `json:"account_id,omitempty"`
 	AvailabilityZone   string `json:"availability_zone,omitempty"`
 	VPCID              string `json:"vpc_id,omitempty"`
 	SubnetID           string `json:"subnet_id,omitempty"`

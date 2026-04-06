@@ -2,22 +2,23 @@ package lookup
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resourcegraph/armresourcegraph"
 )
 
-// AzureTenant queries the user's Azure subscription for public IP ownership.
+// AzureTenant queries all Azure subscriptions the caller has access to
+// using Azure Resource Graph for fast, indexed cross-subscription IP search.
 type AzureTenant struct {
-	subscriptionID string
-	result         *AzureTenantResult
+	result *AzureTenantResult
 }
 
-func NewAzureTenant(subscriptionID string) *AzureTenant {
-	return &AzureTenant{subscriptionID: subscriptionID}
+func NewAzureTenant() *AzureTenant {
+	return &AzureTenant{}
 }
 
 func (a *AzureTenant) Name() string { return "azure_tenant" }
@@ -28,95 +29,160 @@ func (a *AzureTenant) Lookup(ctx context.Context, ip net.IP) error {
 		return fmt.Errorf("Azure auth failed: %w", err)
 	}
 
-	client, err := armnetwork.NewPublicIPAddressesClient(a.subscriptionID, cred, nil)
+	client, err := armresourcegraph.NewClient(cred, nil)
 	if err != nil {
-		return fmt.Errorf("Azure client creation failed: %w", err)
+		return fmt.Errorf("Azure Resource Graph client failed: %w", err)
 	}
 
 	targetIP := ip.String()
-	pager := client.NewListAllPager(nil)
 
-	for pager.More() {
-		page, err := pager.NextPage(ctx)
-		if err != nil {
-			return fmt.Errorf("Azure API error listing public IPs: %w", err)
-		}
+	// Query public IPs across all accessible subscriptions
+	query := fmt.Sprintf(`
+		Resources
+		| where type =~ "microsoft.network/publicipaddresses"
+		| where properties.ipAddress == "%s"
+		| project
+			id,
+			name,
+			subscriptionId,
+			resourceGroup,
+			location,
+			sku = tostring(sku.name),
+			allocationMethod = tostring(properties.publicIPAllocationMethod),
+			fqdn = tostring(properties.dnsSettings.fqdn),
+			ipConfigId = tostring(properties.ipConfiguration.id)
+	`, targetIP)
 
-		for _, pip := range page.Value {
-			if pip.Properties == nil || pip.Properties.IPAddress == nil {
-				continue
-			}
-			if *pip.Properties.IPAddress != targetIP {
-				continue
-			}
+	resultFormat := armresourcegraph.ResultFormatObjectArray
+	resp, err := client.Resources(ctx, armresourcegraph.QueryRequest{
+		Query: &query,
+		Options: &armresourcegraph.QueryRequestOptions{
+			ResultFormat: &resultFormat,
+		},
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("Azure Resource Graph query failed: %w", err)
+	}
 
-			// Found a match
-			result := &AzureTenantResult{
-				Found:          true,
-				SubscriptionID: a.subscriptionID,
-			}
+	// Parse results
+	data, ok := resp.Data.([]any)
+	if !ok || len(data) == 0 {
+		a.result = &AzureTenantResult{Found: false}
+		return nil
+	}
 
-			if pip.ID != nil {
-				result.ResourceID = *pip.ID
-				result.ResourceGroup = extractAzureResourceGroup(*pip.ID)
-			}
-			if pip.Name != nil {
-				result.PublicIPName = *pip.Name
-			}
-			if pip.Location != nil {
-				result.Location = *pip.Location
-			}
-			if pip.Properties.PublicIPAllocationMethod != nil {
-				result.AllocationMethod = string(*pip.Properties.PublicIPAllocationMethod)
-			}
-			if pip.SKU != nil && pip.SKU.Name != nil {
-				result.SKU = string(*pip.SKU.Name)
-			}
-			if pip.Properties.DNSSettings != nil && pip.Properties.DNSSettings.Fqdn != nil {
-				result.FQDN = *pip.Properties.DNSSettings.Fqdn
-			}
+	// Take the first match
+	rowBytes, err := json.Marshal(data[0])
+	if err != nil {
+		return fmt.Errorf("Azure result parsing failed: %w", err)
+	}
 
-			// Determine attached resource
-			if pip.Properties.IPConfiguration != nil && pip.Properties.IPConfiguration.ID != nil {
-				configID := *pip.Properties.IPConfiguration.ID
-				result.AttachedTo = classifyAzureResource(configID)
-				result.AttachedResourceID = configID
+	var row argPublicIPRow
+	if err := json.Unmarshal(rowBytes, &row); err != nil {
+		return fmt.Errorf("Azure result unmarshal failed: %w", err)
+	}
 
-				// Try to resolve to the VM if it's a NIC
-				if strings.Contains(configID, "/networkInterfaces/") {
-					if vmInfo := resolveAzureNICToVM(ctx, cred, a.subscriptionID, configID); vmInfo != "" {
-						result.AttachedTo = "Virtual Machine"
-						result.VMName = vmInfo
-					}
-				}
+	result := &AzureTenantResult{
+		Found:            true,
+		SubscriptionID:   row.SubscriptionID,
+		ResourceGroup:    row.ResourceGroup,
+		ResourceID:       row.ID,
+		PublicIPName:     row.Name,
+		Location:         row.Location,
+		AllocationMethod: row.AllocationMethod,
+		SKU:              row.SKU,
+		FQDN:             row.FQDN,
+	}
+
+	// Classify attached resource from IP configuration ID
+	if row.IPConfigID != "" {
+		result.AttachedTo = classifyAzureResource(row.IPConfigID)
+		result.AttachedResourceID = row.IPConfigID
+
+		// Try to resolve VM name via a second Resource Graph query
+		if strings.Contains(strings.ToLower(row.IPConfigID), "/networkinterfaces/") {
+			if vmName := a.resolveNICToVM(ctx, client, row.IPConfigID); vmName != "" {
+				result.AttachedTo = "Virtual Machine"
+				result.VMName = vmName
 			}
-
-			a.result = result
-			return nil
 		}
 	}
 
-	// IP not found in this subscription
-	a.result = &AzureTenantResult{
-		Found:          false,
-		SubscriptionID: a.subscriptionID,
-	}
+	a.result = result
 	return nil
+}
+
+// resolveNICToVM uses Resource Graph to find the VM attached to a NIC.
+func (a *AzureTenant) resolveNICToVM(ctx context.Context, client *armresourcegraph.Client, ipConfigID string) string {
+	// Extract the NIC resource ID from the IP configuration ID
+	// Format: /subscriptions/.../networkInterfaces/<nic>/ipConfigurations/<config>
+	nicID := extractNICIDFromConfigID(ipConfigID)
+	if nicID == "" {
+		return ""
+	}
+
+	query := fmt.Sprintf(`
+		Resources
+		| where type =~ "microsoft.compute/virtualmachines"
+		| mv-expand nic = properties.networkProfile.networkInterfaces
+		| where tolower(tostring(nic.id)) == tolower("%s")
+		| project name
+		| limit 1
+	`, nicID)
+
+	resultFormat := armresourcegraph.ResultFormatObjectArray
+	resp, err := client.Resources(ctx, armresourcegraph.QueryRequest{
+		Query: &query,
+		Options: &armresourcegraph.QueryRequestOptions{
+			ResultFormat: &resultFormat,
+		},
+	}, nil)
+	if err != nil {
+		return ""
+	}
+
+	data, ok := resp.Data.([]any)
+	if !ok || len(data) == 0 {
+		return ""
+	}
+
+	rowBytes, _ := json.Marshal(data[0])
+	var row struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(rowBytes, &row) == nil {
+		return row.Name
+	}
+	return ""
 }
 
 func (a *AzureTenant) Apply(result *Result) {
 	result.AzureTenant = a.result
 }
 
-// extractAzureResourceGroup parses the resource group from an ARM resource ID.
-func extractAzureResourceGroup(resourceID string) string {
-	parts := strings.Split(resourceID, "/")
-	for i, p := range parts {
-		if strings.EqualFold(p, "resourceGroups") && i+1 < len(parts) {
-			return parts[i+1]
-		}
+// argPublicIPRow maps a single row from the Resource Graph query.
+type argPublicIPRow struct {
+	ID               string `json:"id"`
+	Name             string `json:"name"`
+	SubscriptionID   string `json:"subscriptionId"`
+	ResourceGroup    string `json:"resourceGroup"`
+	Location         string `json:"location"`
+	SKU              string `json:"sku"`
+	AllocationMethod string `json:"allocationMethod"`
+	FQDN             string `json:"fqdn"`
+	IPConfigID       string `json:"ipConfigId"`
+}
+
+// extractNICIDFromConfigID extracts the NIC resource ID from an IP configuration ID.
+// Input:  /subscriptions/.../networkInterfaces/<nic>/ipConfigurations/<config>
+// Output: /subscriptions/.../networkInterfaces/<nic>
+func extractNICIDFromConfigID(configID string) string {
+	lower := strings.ToLower(configID)
+	idx := strings.Index(lower, "/ipconfigurations/")
+	if idx == -1 {
+		return ""
 	}
-	return ""
+	return configID[:idx]
 }
 
 // classifyAzureResource determines the resource type from an IP configuration ID.
@@ -138,44 +204,4 @@ func classifyAzureResource(configID string) string {
 	default:
 		return "Unknown"
 	}
-}
-
-// resolveAzureNICToVM gets the VM name from a NIC's IP configuration ID.
-func resolveAzureNICToVM(ctx context.Context, cred *azidentity.DefaultAzureCredential, subscriptionID, configID string) string {
-	// Extract resource group and NIC name from the config ID
-	// Format: /subscriptions/.../resourceGroups/<rg>/providers/Microsoft.Network/networkInterfaces/<nic>/ipConfigurations/<config>
-	parts := strings.Split(configID, "/")
-	var rg, nicName string
-	for i, p := range parts {
-		if strings.EqualFold(p, "resourceGroups") && i+1 < len(parts) {
-			rg = parts[i+1]
-		}
-		if strings.EqualFold(p, "networkInterfaces") && i+1 < len(parts) {
-			nicName = parts[i+1]
-		}
-	}
-	if rg == "" || nicName == "" {
-		return ""
-	}
-
-	nicClient, err := armnetwork.NewInterfacesClient(subscriptionID, cred, nil)
-	if err != nil {
-		return ""
-	}
-
-	nic, err := nicClient.Get(ctx, rg, nicName, nil)
-	if err != nil {
-		return ""
-	}
-
-	if nic.Properties != nil && nic.Properties.VirtualMachine != nil && nic.Properties.VirtualMachine.ID != nil {
-		vmID := *nic.Properties.VirtualMachine.ID
-		// Extract just the VM name from the ID
-		vmParts := strings.Split(vmID, "/")
-		if len(vmParts) > 0 {
-			return vmParts[len(vmParts)-1]
-		}
-	}
-
-	return ""
 }

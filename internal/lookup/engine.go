@@ -21,7 +21,7 @@ type Engine struct {
 func NewEngine(cfg *config.Config) *Engine {
 	e := &Engine{
 		cfg:     cfg,
-		timeout: 30 * time.Second,
+		timeout: 45 * time.Second,
 	}
 
 	// Always-on (free) providers
@@ -50,12 +50,17 @@ func NewEngine(cfg *config.Config) *Engine {
 		e.providers = append(e.providers, NewVirusTotal(cfg.VirusTotalAPIKey))
 	}
 
-	// Authenticated tenant lookups (Phase 2)
+	// Authenticated tenant lookups — broad search across all accessible resources
 	if cfg.HasAzureTenant() {
-		e.providers = append(e.providers, NewAzureTenant(cfg.AzureSubscriptionID))
+		e.providers = append(e.providers, NewAzureTenant())
 	}
 	if cfg.HasAWSTenant() {
-		e.providers = append(e.providers, NewAWSTenant(cfg.AWSRegion))
+		e.providers = append(e.providers, NewAWSTenant(AWSTenantConfig{
+			SSORoleName: cfg.AWSSSORole,
+			SSORegion:   cfg.AWSSSORegion,
+			Profiles:    cfg.AWSProfiles,
+			Regions:     cfg.AWSRegions,
+		}))
 	}
 
 	return e
