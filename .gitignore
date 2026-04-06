@@ -4,7 +4,7 @@
 ./tmp/
 tmp/
 *.exe
-ipintel
+/ipintel
 dist/
 .idea/
 .vscode/
