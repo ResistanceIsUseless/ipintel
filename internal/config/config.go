@@ -25,6 +25,10 @@ type Config struct {
 	AWSProfiles  []string // AWS CLI profile names (fallback if SSO not configured)
 	AWSRegions   []string // regions to search (empty = all major regions)
 	AWSEnabled   bool
+
+	// Runtime overrides (set via CLI flags, not env)
+	SkipAWS   bool
+	SkipAzure bool
 }
 
 // Load reads configuration from environment variables.
@@ -103,13 +107,13 @@ func (c *Config) HasVirusTotal() bool {
 // Auth uses DefaultAzureCredential which supports az login, env vars, and managed identity.
 // Resource Graph searches all subscriptions the credential can access.
 func (c *Config) HasAzureTenant() bool {
-	return c.AzureEnabled
+	return c.AzureEnabled && !c.SkipAzure
 }
 
 // HasAWSTenant returns true if AWS tenant lookup is enabled.
 // Searches across all configured profiles and regions.
 func (c *Config) HasAWSTenant() bool {
-	return c.AWSEnabled
+	return c.AWSEnabled && !c.SkipAWS
 }
 
 // LoadDotEnv is a simple .env file loader. It reads key=value pairs

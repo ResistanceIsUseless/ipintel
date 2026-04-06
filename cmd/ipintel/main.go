@@ -22,11 +22,15 @@ func main() {
 		jsonOutput  bool
 		noSpinner   bool
 		showVersion bool
+		noAWS       bool
+		noAzure     bool
 	)
 
 	flag.BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 	flag.BoolVar(&noSpinner, "no-spinner", false, "Disable animated spinner (for piping)")
 	flag.BoolVar(&showVersion, "version", false, "Show version")
+	flag.BoolVar(&noAWS, "no-aws", false, "Skip AWS tenant lookup")
+	flag.BoolVar(&noAzure, "no-azure", false, "Skip Azure tenant lookup")
 	flag.Usage = func() {
 		title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7C3AED")).Render("ipintel")
 		fmt.Fprintf(os.Stderr, "%s - IP Intelligence Lookup\n\n", title)
@@ -60,6 +64,8 @@ func main() {
 	// Load .env as fallback (direnv preferred)
 	config.LoadDotEnv()
 	cfg := config.Load()
+	cfg.SkipAWS = noAWS
+	cfg.SkipAzure = noAzure
 
 	ctx := context.Background()
 
