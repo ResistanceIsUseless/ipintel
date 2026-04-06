@@ -26,9 +26,15 @@ func NewEngine(cfg *config.Config) *Engine {
 
 	// Always-on (free) providers
 	e.providers = append(e.providers, NewReverseDNS())
+	e.providers = append(e.providers, NewDNSIntel())
+	e.providers = append(e.providers, NewForwardDNSRecon())
 	e.providers = append(e.providers, NewRDAP())
+	e.providers = append(e.providers, NewASNLookup())
 	e.providers = append(e.providers, NewCloudDetector())
+	e.providers = append(e.providers, NewCDNDetector())
 	e.providers = append(e.providers, NewCrtSh())
+	e.providers = append(e.providers, NewPortScanner())
+	e.providers = append(e.providers, NewWebIntel())
 
 	// API-key providers
 	if cfg.HasGreyNoise() {

@@ -116,8 +116,15 @@ func renderStyled(w io.Writer, result *lookup.Result) error {
 	sb.WriteString(boxStyle.Render(header))
 	sb.WriteString("\n")
 
+	// --- Network Identity ---
+
 	// Reverse DNS
 	sb.WriteString(renderReverseDNS(result))
+
+	// ASN
+	if result.ASN != nil {
+		sb.WriteString(renderASN(result.ASN))
+	}
 
 	// RDAP
 	if result.RDAP != nil {
@@ -128,6 +135,37 @@ func renderStyled(w io.Writer, result *lookup.Result) error {
 	if result.Cloud != nil {
 		sb.WriteString(renderCloud(result.Cloud))
 	}
+
+	// CDN / WAF
+	if result.CDN != nil && result.CDN.Detected {
+		sb.WriteString(renderCDN(result.CDN))
+	}
+
+	// --- DNS Deep Dive ---
+
+	// DNS Intelligence
+	if result.DNSIntel != nil {
+		sb.WriteString(renderDNSIntel(result.DNSIntel))
+	}
+
+	// Forward DNS Recon
+	if result.ForwardDNS != nil {
+		sb.WriteString(renderForwardDNS(result.ForwardDNS))
+	}
+
+	// --- Infrastructure ---
+
+	// Port Scan
+	if result.Ports != nil {
+		sb.WriteString(renderPortScan(result.Ports))
+	}
+
+	// Web / TLS Intel
+	if result.WebIntel != nil {
+		sb.WriteString(renderWebIntel(result.WebIntel))
+	}
+
+	// --- Threat Intelligence ---
 
 	// GreyNoise
 	if result.GreyNoise != nil {
@@ -396,6 +434,353 @@ func renderErrors(errors []lookup.ProviderError) string {
 		sb.WriteString(lipgloss.NewStyle().PaddingLeft(1).Render(line))
 		sb.WriteString("\n")
 	}
+	return sb.String()
+}
+
+func renderASN(a *lookup.ASNResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("ASN"))
+	sb.WriteString("\n")
+
+	rows := [][]string{}
+	if a.Number != "" {
+		rows = append(rows, []string{"AS Number", a.Number})
+	}
+	if a.Name != "" {
+		rows = append(rows, []string{"AS Name", a.Name})
+	}
+	if a.CIDR != "" {
+		rows = append(rows, []string{"Prefix", a.CIDR})
+	}
+	if a.Country != "" {
+		rows = append(rows, []string{"Country", a.Country})
+	}
+	if a.RIR != "" {
+		rows = append(rows, []string{"RIR", a.RIR})
+	}
+
+	if len(rows) == 0 {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(dimStyle.Render("No ASN data")))
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString(renderKVTable(rows))
+	}
+	return sb.String()
+}
+
+func renderCDN(c *lookup.CDNResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("CDN / WAF Detection"))
+	sb.WriteString("\n")
+
+	typeLabel := strings.ToUpper(c.Type) // "CDN", "WAF", or "CLOUD"
+	var badge string
+	switch strings.ToLower(c.Type) {
+	case "waf":
+		badge = dangerBadge.Render(typeLabel)
+	case "cdn":
+		badge = warnBadge.Render(typeLabel)
+	default:
+		badge = successBadge.Render(typeLabel)
+	}
+
+	rows := [][]string{
+		{"Provider", c.Name},
+		{"Type", badge},
+	}
+	if c.Category != "" {
+		rows = append(rows, []string{"Category", c.Category})
+	}
+
+	sb.WriteString(renderKVTable(rows))
+	return sb.String()
+}
+
+func renderDNSIntel(d *lookup.DNSIntelResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("DNS Intelligence"))
+	sb.WriteString("\n")
+
+	// SOA / Reverse Zone
+	rows := [][]string{}
+	if d.ReverseZone != "" {
+		rows = append(rows, []string{"Reverse Zone", d.ReverseZone})
+	}
+	if d.SOAPrimary != "" {
+		rows = append(rows, []string{"SOA Primary", d.SOAPrimary})
+	}
+	if d.SOAEmail != "" {
+		rows = append(rows, []string{"SOA Email", d.SOAEmail})
+	}
+	if len(d.Nameservers) > 0 {
+		rows = append(rows, []string{"Nameservers", strings.Join(d.Nameservers, ", ")})
+	}
+
+	if len(rows) > 0 {
+		sb.WriteString(renderKVTable(rows))
+	}
+
+	// FCrDNS
+	if len(d.FCrDNS) > 0 {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(1).PaddingTop(1).Bold(true).Foreground(colorLabel).Render("Forward-Confirmed rDNS"))
+		sb.WriteString("\n")
+		for _, entry := range d.FCrDNS {
+			var status string
+			if entry.Confirmed {
+				status = successBadge.Render("CONFIRMED")
+			} else {
+				status = warnBadge.Render("MISMATCH")
+			}
+			fwdIP := entry.ForwardIP
+			if fwdIP == "" {
+				fwdIP = "NXDOMAIN"
+			}
+			sb.WriteString(fieldRow(entry.PTR, fmt.Sprintf("%s -> %s  %s", entry.PTR, fwdIP, status)))
+		}
+	}
+
+	// Auth vs Recursive PTR comparison
+	if d.PTRMismatch {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(1).PaddingTop(1).Render(
+			dangerBadge.Render("! PTR MISMATCH: authoritative and recursive resolvers disagree"),
+		))
+		sb.WriteString("\n")
+		if len(d.AuthPTR) > 0 {
+			sb.WriteString(fieldRow("Auth PTR", strings.Join(d.AuthPTR, ", ")))
+		}
+		if len(d.RecursivePTR) > 0 {
+			sb.WriteString(fieldRow("Recursive PTR", strings.Join(d.RecursivePTR, ", ")))
+		}
+	}
+
+	// AXFR
+	if d.AXFRSuccess {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(1).PaddingTop(1).Bold(true).Foreground(colorLabel).Render("Zone Transfer (AXFR)"))
+		sb.WriteString("\n")
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(
+			dangerBadge.Render(fmt.Sprintf("AXFR ALLOWED — %d records retrieved", len(d.AXFRRecords))),
+		))
+		sb.WriteString("\n")
+		// Show first 10 records as a preview
+		limit := len(d.AXFRRecords)
+		if limit > 10 {
+			limit = 10
+		}
+		for _, rec := range d.AXFRRecords[:limit] {
+			sb.WriteString(lipgloss.NewStyle().PaddingLeft(5).Render(dimStyle.Render(rec)))
+			sb.WriteString("\n")
+		}
+		if len(d.AXFRRecords) > 10 {
+			sb.WriteString(lipgloss.NewStyle().PaddingLeft(5).Render(
+				dimStyle.Render(fmt.Sprintf("... and %d more records", len(d.AXFRRecords)-10)),
+			))
+			sb.WriteString("\n")
+		}
+	}
+
+	// DNS Trace
+	if len(d.Trace) > 0 {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(1).PaddingTop(1).Bold(true).Foreground(colorLabel).Render("DNS Trace (delegation chain)"))
+		sb.WriteString("\n")
+		for i, hop := range d.Trace {
+			prefix := "  "
+			if i == len(d.Trace)-1 {
+				prefix = "  "
+			}
+			serverStr := dimStyle.Render(hop.Server)
+			queryStr := valueStyle.Render(fmt.Sprintf("%s %s", hop.Query, hop.Type))
+			answersStr := ""
+			if len(hop.Answers) > 0 {
+				answersStr = " -> " + strings.Join(hop.Answers, ", ")
+			}
+			rcode := ""
+			if hop.Rcode != "" && hop.Rcode != "NOERROR" {
+				rcode = " " + warnBadge.Render(hop.Rcode)
+			}
+			line := fmt.Sprintf("%s@%s  %s%s%s", prefix, serverStr, queryStr, answersStr, rcode)
+			sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(line))
+			sb.WriteString("\n")
+		}
+	}
+
+	return sb.String()
+}
+
+func renderForwardDNS(f *lookup.ForwardDNSResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("Forward DNS Recon"))
+	sb.WriteString("\n")
+
+	if f.Hostname != "" {
+		sb.WriteString(fieldRow("Hostname", f.Hostname))
+	}
+
+	type recordSet struct {
+		label   string
+		records []string
+	}
+	sets := []recordSet{
+		{"A", f.A},
+		{"AAAA", f.AAAA},
+		{"CNAME", f.CNAME},
+		{"MX", f.MX},
+		{"NS", f.NS},
+		{"TXT", f.TXT},
+		{"SOA", f.SOA},
+		{"CAA", f.CAA},
+		{"SRV", f.SRV},
+	}
+
+	found := false
+	for _, s := range sets {
+		if len(s.records) > 0 {
+			found = true
+			sb.WriteString(fieldRow(s.label, strings.Join(s.records, ", ")))
+		}
+	}
+
+	if !found {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(dimStyle.Render("No forward DNS records found")))
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+func renderPortScan(p *lookup.PortScanResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("Port Scan"))
+	sb.WriteString("\n")
+
+	if len(p.OpenPorts) == 0 {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(dimStyle.Render("No open ports detected")))
+		sb.WriteString("\n")
+		if p.ScanTime != "" {
+			sb.WriteString(fieldRow("Scan Time", p.ScanTime))
+		}
+		return sb.String()
+	}
+
+	t := table.New().
+		Border(lipgloss.NormalBorder()).
+		BorderStyle(borderStyle).
+		Headers("Port", "Protocol", "Service", "Banner").
+		StyleFunc(func(row, col int) lipgloss.Style {
+			s := lipgloss.NewStyle().Padding(0, 1)
+			if row == table.HeaderRow {
+				return s.Foreground(colorSecondary).Bold(true)
+			}
+			if row%2 == 0 {
+				return s.Foreground(colorValue)
+			}
+			return s.Foreground(colorLabel)
+		}).
+		Width(80)
+
+	for _, port := range p.OpenPorts {
+		banner := port.Banner
+		if len(banner) > 40 {
+			banner = banner[:40] + "..."
+		}
+		t.Row(
+			fmt.Sprintf("%d", port.Port),
+			port.Protocol,
+			port.Service,
+			banner,
+		)
+	}
+
+	sb.WriteString(lipgloss.NewStyle().PaddingLeft(2).Render(t.Render()))
+	sb.WriteString("\n")
+
+	if p.ScanTime != "" {
+		sb.WriteString(fieldRow("Scan Time", p.ScanTime))
+	}
+
+	return sb.String()
+}
+
+func renderWebIntel(wi *lookup.WebIntelResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("Web / TLS Intelligence"))
+	sb.WriteString("\n")
+
+	// TLS section
+	if wi.TLS != nil {
+		t := wi.TLS
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(1).Bold(true).Foreground(colorLabel).Render("TLS Certificate"))
+		sb.WriteString("\n")
+
+		rows := [][]string{}
+		if t.CommonName != "" {
+			rows = append(rows, []string{"Common Name", t.CommonName})
+		}
+		if t.Issuer != "" {
+			rows = append(rows, []string{"Issuer", t.Issuer})
+		}
+		if len(t.SANs) > 0 {
+			sans := strings.Join(t.SANs, ", ")
+			if len(sans) > 80 {
+				sans = sans[:80] + "..."
+			}
+			rows = append(rows, []string{"SANs", sans})
+		}
+		if t.Version != "" {
+			rows = append(rows, []string{"TLS Version", t.Version})
+		}
+		if t.NotBefore != "" {
+			rows = append(rows, []string{"Valid From", t.NotBefore})
+		}
+		if t.NotAfter != "" {
+			expiry := t.NotAfter
+			if t.Expired {
+				expiry = dangerBadge.Render(expiry + " [EXPIRED]")
+			}
+			rows = append(rows, []string{"Valid Until", expiry})
+		}
+		sb.WriteString(renderKVTable(rows))
+	}
+
+	// HTTP section
+	if wi.HTTP != nil {
+		h := wi.HTTP
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(1).PaddingTop(1).Bold(true).Foreground(colorLabel).Render("HTTP Metadata"))
+		sb.WriteString("\n")
+
+		rows := [][]string{}
+		if h.StatusCode != 0 {
+			status := fmt.Sprintf("%d", h.StatusCode)
+			switch {
+			case h.StatusCode >= 500:
+				status = dangerBadge.Render(status)
+			case h.StatusCode >= 400:
+				status = warnBadge.Render(status)
+			case h.StatusCode >= 300:
+				status = dimStyle.Render(status)
+			default:
+				status = successBadge.Render(status)
+			}
+			rows = append(rows, []string{"Status", status})
+		}
+		if h.Server != "" {
+			rows = append(rows, []string{"Server", h.Server})
+		}
+		if h.PoweredBy != "" {
+			rows = append(rows, []string{"X-Powered-By", h.PoweredBy})
+		}
+		if h.Title != "" {
+			rows = append(rows, []string{"Title", h.Title})
+		}
+		if h.RedirectURL != "" {
+			rows = append(rows, []string{"Redirect", h.RedirectURL})
+		}
+		// Interesting headers
+		for k, v := range h.Headers {
+			rows = append(rows, []string{k, v})
+		}
+		sb.WriteString(renderKVTable(rows))
+	}
+
 	return sb.String()
 }
 
