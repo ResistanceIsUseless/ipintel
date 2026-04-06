@@ -47,8 +47,17 @@ type Result struct {
 	// Shodan
 	Shodan *ShodanResult `json:"shodan,omitempty"`
 
+	// VirusTotal
+	VirusTotal *VirusTotalResult `json:"virustotal,omitempty"`
+
 	// Certificate Transparency (crt.sh)
 	Certificates []CertResult `json:"certificates,omitempty"`
+
+	// Azure tenant lookup (authenticated)
+	AzureTenant *AzureTenantResult `json:"azure_tenant,omitempty"`
+
+	// AWS tenant lookup (authenticated)
+	AWSTenant *AWSTenantResult `json:"aws_tenant,omitempty"`
 
 	// Errors from individual providers (non-fatal)
 	Errors []ProviderError `json:"errors,omitempty"`
@@ -231,6 +240,64 @@ type HTTPInfo struct {
 	Title       string            `json:"title,omitempty"`
 	RedirectURL string            `json:"redirect_url,omitempty"`
 	Headers     map[string]string `json:"interesting_headers,omitempty"` // security headers, etc.
+}
+
+// --- VirusTotal results ---
+
+type VirusTotalResult struct {
+	Reputation     int      `json:"reputation"`                // community score (negative = bad)
+	Malicious      int      `json:"malicious"`                 // engines flagging as malicious
+	Suspicious     int      `json:"suspicious"`                // engines flagging as suspicious
+	Harmless       int      `json:"harmless"`                  // engines flagging as harmless
+	Undetected     int      `json:"undetected"`                // engines with no verdict
+	TotalEngines   int      `json:"total_engines"`             // total engines that analyzed
+	ASN            int      `json:"asn,omitempty"`             // AS number
+	ASOwner        string   `json:"as_owner,omitempty"`        // AS owner name
+	Country        string   `json:"country,omitempty"`         // country code
+	Network        string   `json:"network,omitempty"`         // CIDR
+	JARM           string   `json:"jarm,omitempty"`            // JARM fingerprint
+	VotesMalicious int      `json:"votes_malicious,omitempty"` // community malicious votes
+	VotesHarmless  int      `json:"votes_harmless,omitempty"`  // community harmless votes
+	FlaggedBy      []string `json:"flagged_by,omitempty"`      // top engines that flagged it
+	Link           string   `json:"link,omitempty"`            // VT GUI link
+	Message        string   `json:"message,omitempty"`         // status message (e.g., not found)
+}
+
+// --- Azure tenant results ---
+
+type AzureTenantResult struct {
+	Found              bool   `json:"found"`
+	SubscriptionID     string `json:"subscription_id,omitempty"`
+	ResourceGroup      string `json:"resource_group,omitempty"`
+	ResourceID         string `json:"resource_id,omitempty"`
+	PublicIPName       string `json:"public_ip_name,omitempty"`
+	Location           string `json:"location,omitempty"`
+	AllocationMethod   string `json:"allocation_method,omitempty"` // Static or Dynamic
+	SKU                string `json:"sku,omitempty"`               // Basic or Standard
+	FQDN               string `json:"fqdn,omitempty"`
+	AttachedTo         string `json:"attached_to,omitempty"`          // resource type (VM, LB, etc.)
+	AttachedResourceID string `json:"attached_resource_id,omitempty"` // full ARM ID
+	VMName             string `json:"vm_name,omitempty"`              // if attached to a VM
+}
+
+// --- AWS tenant results ---
+
+type AWSTenantResult struct {
+	Found              bool   `json:"found"`
+	Region             string `json:"region,omitempty"`
+	IPType             string `json:"ip_type,omitempty"` // "Elastic IP" or "Ephemeral"
+	PublicIP           string `json:"public_ip,omitempty"`
+	PrivateIP          string `json:"private_ip,omitempty"`
+	InstanceID         string `json:"instance_id,omitempty"`
+	NetworkInterfaceID string `json:"network_interface_id,omitempty"`
+	AllocationID       string `json:"allocation_id,omitempty"`
+	AssociationID      string `json:"association_id,omitempty"`
+	ResourceType       string `json:"resource_type,omitempty"` // EC2, NAT Gateway, NLB, etc.
+	Description        string `json:"description,omitempty"`
+	AccountID          string `json:"account_id,omitempty"`
+	AvailabilityZone   string `json:"availability_zone,omitempty"`
+	VPCID              string `json:"vpc_id,omitempty"`
+	SubnetID           string `json:"subnet_id,omitempty"`
 }
 
 // Provider is the interface all intelligence sources implement.

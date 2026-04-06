@@ -182,9 +182,26 @@ func renderStyled(w io.Writer, result *lookup.Result) error {
 		sb.WriteString(renderShodan(result.Shodan))
 	}
 
+	// VirusTotal
+	if result.VirusTotal != nil {
+		sb.WriteString(renderVirusTotal(result.VirusTotal))
+	}
+
 	// Certificates
 	if len(result.Certificates) > 0 {
 		sb.WriteString(renderCerts(result.Certificates))
+	}
+
+	// --- Cloud Tenant Lookups ---
+
+	// Azure Tenant
+	if result.AzureTenant != nil {
+		sb.WriteString(renderAzureTenant(result.AzureTenant))
+	}
+
+	// AWS Tenant
+	if result.AWSTenant != nil {
+		sb.WriteString(renderAWSTenant(result.AWSTenant))
 	}
 
 	// Errors
@@ -781,6 +798,184 @@ func renderWebIntel(wi *lookup.WebIntelResult) string {
 		sb.WriteString(renderKVTable(rows))
 	}
 
+	return sb.String()
+}
+
+func renderVirusTotal(vt *lookup.VirusTotalResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("VirusTotal"))
+	sb.WriteString("\n")
+
+	if vt.Message != "" && vt.TotalEngines == 0 {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(dimStyle.Render(vt.Message)))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	// Detection ratio badge
+	detections := vt.Malicious + vt.Suspicious
+	var detBadge string
+	switch {
+	case detections == 0:
+		detBadge = successBadge.Render(fmt.Sprintf("%d/%d", detections, vt.TotalEngines))
+	case detections <= 3:
+		detBadge = warnBadge.Render(fmt.Sprintf("%d/%d", detections, vt.TotalEngines))
+	default:
+		detBadge = dangerBadge.Render(fmt.Sprintf("%d/%d", detections, vt.TotalEngines))
+	}
+
+	// Reputation badge
+	var repBadge string
+	switch {
+	case vt.Reputation < -10:
+		repBadge = dangerBadge.Render(fmt.Sprintf("%d", vt.Reputation))
+	case vt.Reputation < 0:
+		repBadge = warnBadge.Render(fmt.Sprintf("%d", vt.Reputation))
+	default:
+		repBadge = successBadge.Render(fmt.Sprintf("%d", vt.Reputation))
+	}
+
+	rows := [][]string{
+		{"Detections", detBadge + " engines"},
+		{"Reputation", repBadge},
+	}
+	if vt.Malicious > 0 {
+		rows = append(rows, []string{"Malicious", dangerBadge.Render(fmt.Sprintf("%d", vt.Malicious))})
+	}
+	if vt.Suspicious > 0 {
+		rows = append(rows, []string{"Suspicious", warnBadge.Render(fmt.Sprintf("%d", vt.Suspicious))})
+	}
+	rows = append(rows, []string{"Harmless", fmt.Sprintf("%d", vt.Harmless)})
+	rows = append(rows, []string{"Undetected", fmt.Sprintf("%d", vt.Undetected)})
+
+	if vt.VotesMalicious > 0 || vt.VotesHarmless > 0 {
+		rows = append(rows, []string{"Community Votes", fmt.Sprintf("%d malicious / %d harmless", vt.VotesMalicious, vt.VotesHarmless)})
+	}
+	if len(vt.FlaggedBy) > 0 {
+		rows = append(rows, []string{"Flagged By", strings.Join(vt.FlaggedBy, ", ")})
+	}
+	if vt.JARM != "" && vt.JARM != "00000000000000000000000000000000000000000000000000000000000000000" {
+		jarm := vt.JARM
+		if len(jarm) > 32 {
+			jarm = jarm[:32] + "..."
+		}
+		rows = append(rows, []string{"JARM", jarm})
+	}
+	if vt.Link != "" {
+		rows = append(rows, []string{"Link", vt.Link})
+	}
+
+	sb.WriteString(renderKVTable(rows))
+	return sb.String()
+}
+
+func renderAzureTenant(az *lookup.AzureTenantResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("Azure Tenant Lookup"))
+	sb.WriteString("\n")
+
+	if !az.Found {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(
+			dimStyle.Render(fmt.Sprintf("Not found in subscription %s", az.SubscriptionID)),
+		))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	badge := cloudBadge.Background(lipgloss.Color("#0078D4")).Render("FOUND IN AZURE")
+	sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(badge))
+	sb.WriteString("\n\n")
+
+	rows := [][]string{}
+	if az.SubscriptionID != "" {
+		rows = append(rows, []string{"Subscription", az.SubscriptionID})
+	}
+	if az.ResourceGroup != "" {
+		rows = append(rows, []string{"Resource Group", az.ResourceGroup})
+	}
+	if az.PublicIPName != "" {
+		rows = append(rows, []string{"Public IP Name", az.PublicIPName})
+	}
+	if az.Location != "" {
+		rows = append(rows, []string{"Location", az.Location})
+	}
+	if az.AllocationMethod != "" {
+		rows = append(rows, []string{"Allocation", az.AllocationMethod})
+	}
+	if az.SKU != "" {
+		rows = append(rows, []string{"SKU", az.SKU})
+	}
+	if az.FQDN != "" {
+		rows = append(rows, []string{"FQDN", az.FQDN})
+	}
+	if az.AttachedTo != "" {
+		rows = append(rows, []string{"Attached To", az.AttachedTo})
+	}
+	if az.VMName != "" {
+		rows = append(rows, []string{"VM Name", az.VMName})
+	}
+
+	sb.WriteString(renderKVTable(rows))
+	return sb.String()
+}
+
+func renderAWSTenant(aw *lookup.AWSTenantResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("AWS Tenant Lookup"))
+	sb.WriteString("\n")
+
+	if !aw.Found {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(
+			dimStyle.Render(fmt.Sprintf("Not found in region %s", aw.Region)),
+		))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	badge := cloudBadge.Background(lipgloss.Color("#FF9900")).Render("FOUND IN AWS")
+	sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(badge))
+	sb.WriteString("\n\n")
+
+	rows := [][]string{}
+	if aw.Region != "" {
+		rows = append(rows, []string{"Region", aw.Region})
+	}
+	if aw.AccountID != "" {
+		rows = append(rows, []string{"Account", aw.AccountID})
+	}
+	if aw.ResourceType != "" {
+		rows = append(rows, []string{"Resource Type", aw.ResourceType})
+	}
+	if aw.IPType != "" {
+		rows = append(rows, []string{"IP Type", aw.IPType})
+	}
+	if aw.InstanceID != "" {
+		rows = append(rows, []string{"Instance ID", aw.InstanceID})
+	}
+	if aw.NetworkInterfaceID != "" {
+		rows = append(rows, []string{"ENI", aw.NetworkInterfaceID})
+	}
+	if aw.PrivateIP != "" {
+		rows = append(rows, []string{"Private IP", aw.PrivateIP})
+	}
+	if aw.AvailabilityZone != "" {
+		rows = append(rows, []string{"AZ", aw.AvailabilityZone})
+	}
+	if aw.VPCID != "" {
+		rows = append(rows, []string{"VPC", aw.VPCID})
+	}
+	if aw.SubnetID != "" {
+		rows = append(rows, []string{"Subnet", aw.SubnetID})
+	}
+	if aw.Description != "" {
+		desc := aw.Description
+		if len(desc) > 60 {
+			desc = desc[:60] + "..."
+		}
+		rows = append(rows, []string{"Description", desc})
+	}
+
+	sb.WriteString(renderKVTable(rows))
 	return sb.String()
 }
 

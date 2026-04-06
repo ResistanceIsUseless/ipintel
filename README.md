@@ -38,22 +38,56 @@ ipintel --json 137.117.57.215
 ipintel --no-spinner 8.8.8.8 | less -R
 ```
 
-## API Keys
+## Configuration
 
-Some providers require API keys. Set them via a `.env` file or environment variables:
+Some providers require API keys or credentials. Set them via a `.env` file or environment variables:
 
 ```sh
 cp .env.example .env
 # Fill in your keys
 ```
 
+### Threat Intelligence API Keys
+
+All optional. The tool runs all free lookups without any configuration.
+
 | Variable | Provider | Required |
 |----------|----------|----------|
 | `GREYNOISE_API_KEY` | GreyNoise | No |
 | `ABUSEIPDB_API_KEY` | AbuseIPDB | No |
 | `SHODAN_API_KEY` | Shodan | No |
+| `VIRUSTOTAL_API_KEY` | VirusTotal | No |
 
-All API-key providers are optional. The tool runs all free lookups without any configuration.
+### Azure Tenant Lookup
+
+Set `AZURE_SUBSCRIPTION_ID` to query your Azure subscription for public IP ownership. Authentication uses `DefaultAzureCredential` which tries, in order:
+
+1. `az login` (easiest for local dev)
+2. Environment variables (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`)
+3. Managed identity (when running in Azure)
+
+```sh
+az login
+export AZURE_SUBSCRIPTION_ID=your-subscription-id
+ipintel 137.117.57.215
+```
+
+### AWS Tenant Lookup
+
+Queries your AWS account for elastic/public IP ownership using `DescribeAddresses` and `DescribeNetworkInterfaces`. Authentication uses the default credential chain:
+
+1. Environment variables (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
+2. `~/.aws/credentials` profile
+3. Instance role (when running in AWS)
+
+Set `AWS_TENANT_ENABLED=true` if using profile or instance auth without explicit keys.
+
+```sh
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_REGION=us-east-1
+ipintel 52.94.76.1
+```
 
 ## What It Does
 
@@ -72,6 +106,7 @@ All providers run concurrently and results are displayed as they complete.
 - Authoritative vs recursive PTR comparison
 - AXFR zone transfer attempt
 - Iterative DNS trace from root servers
+- Forward DNS recon on PTR hostnames (A, AAAA, CNAME, MX, NS, TXT, SOA, CAA, SRV)
 
 **Infrastructure**
 - TCP port scan (24 common ports) with banner grabbing
@@ -82,13 +117,14 @@ All providers run concurrently and results are displayed as they complete.
 - GreyNoise — internet scan classification
 - AbuseIPDB — abuse reports and confidence score
 - Shodan — open ports, vulns, OS fingerprinting
+- VirusTotal — multi-engine detection, reputation, JARM fingerprint
 
 **Certificate Transparency**
 - crt.sh lookup for issued certificates
 
-## Forward DNS Recon
-
-When a PTR record is found, ipintel queries the hostname for A, AAAA, CNAME, MX, NS, TXT, SOA, CAA, and SRV records — giving full DNS context for the host behind the IP.
+**Cloud Tenant Lookups** (requires credentials)
+- Azure — resolve IP to subscription, resource group, VM, load balancer, etc.
+- AWS — resolve IP to EC2 instance, ENI, NAT gateway, NLB, etc.
 
 ## Architecture
 
@@ -109,6 +145,9 @@ internal/
     greynoise      GreyNoise API
     abuseipdb      AbuseIPDB API
     shodan         Shodan API
+    virustotal     VirusTotal v3 API
+    azure_tenant   Azure ARM public IP lookup
+    aws_tenant     AWS EC2 describe addresses/ENIs
     crtsh          crt.sh certificate transparency
   output/          Styled terminal renderer + JSON + spinner
 ```

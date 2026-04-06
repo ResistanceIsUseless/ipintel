@@ -46,6 +46,17 @@ func NewEngine(cfg *config.Config) *Engine {
 	if cfg.HasShodan() {
 		e.providers = append(e.providers, NewShodan(cfg.ShodanAPIKey))
 	}
+	if cfg.HasVirusTotal() {
+		e.providers = append(e.providers, NewVirusTotal(cfg.VirusTotalAPIKey))
+	}
+
+	// Authenticated tenant lookups (Phase 2)
+	if cfg.HasAzureTenant() {
+		e.providers = append(e.providers, NewAzureTenant(cfg.AzureSubscriptionID))
+	}
+	if cfg.HasAWSTenant() {
+		e.providers = append(e.providers, NewAWSTenant(cfg.AWSRegion))
+	}
 
 	return e
 }
