@@ -67,14 +67,16 @@ func NewAWSTenant(cfg AWSTenantConfig) *AWSTenant {
 	}
 }
 
-func (a *AWSTenant) Name() string { return "aws_tenant" }
+func (a *AWSTenant) Name() string            { return "aws_tenant" }
+func (a *AWSTenant) SupportsPrivateIP() bool { return true }
 
 func (a *AWSTenant) Lookup(ctx context.Context, ip net.IP) error {
 	targetIP := ip.String()
+	isPrivate := ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
 
 	// Try SSO org mode first if a role name is configured
 	if a.roleName != "" {
-		result, err := a.lookupViaSSO(ctx, targetIP)
+		result, err := a.lookupViaSSO(ctx, targetIP, isPrivate)
 		if err == nil && result != nil {
 			a.result = result
 			return nil
@@ -93,7 +95,7 @@ func (a *AWSTenant) Lookup(ctx context.Context, ip net.IP) error {
 
 	// Profile mode (fallback or explicit)
 	if len(a.profiles) > 0 {
-		result, err := a.lookupViaProfiles(ctx, targetIP)
+		result, err := a.lookupViaProfiles(ctx, targetIP, isPrivate)
 		if err != nil {
 			return err
 		}
@@ -102,7 +104,7 @@ func (a *AWSTenant) Lookup(ctx context.Context, ip net.IP) error {
 	}
 
 	// No SSO role and no profiles — try default credential chain in all regions
-	result, err := a.lookupViaProfiles(ctx, targetIP)
+	result, err := a.lookupViaProfiles(ctx, targetIP, isPrivate)
 	if err != nil {
 		return err
 	}
@@ -111,7 +113,7 @@ func (a *AWSTenant) Lookup(ctx context.Context, ip net.IP) error {
 }
 
 // lookupViaSSO discovers all org accounts via SSO and searches each.
-func (a *AWSTenant) lookupViaSSO(ctx context.Context, targetIP string) (*AWSTenantResult, error) {
+func (a *AWSTenant) lookupViaSSO(ctx context.Context, targetIP string, isPrivate bool) (*AWSTenantResult, error) {
 	token, err := readSSOAccessToken()
 	if err != nil {
 		return nil, fmt.Errorf("reading SSO token: %w (run 'aws sso login' first)", err)
@@ -226,24 +228,35 @@ func (a *AWSTenant) lookupViaSSO(ctx context.Context, targetIP string) (*AWSTena
 				accountName := aws.ToString(ac.account.AccountName)
 				accountID := aws.ToString(ac.account.AccountId)
 
-				// Check Elastic IPs
-				if r := checkElasticIPs(searchCtx, ec2Client, accountID, accountName, reg, targetIP); r != nil {
-					select {
-					case resultCh <- searchResult{result: r}:
-						cancel()
-					default:
+				if isPrivate {
+					// Private IP: search ENIs by private-ip-address
+					if r := checkPrivateNetworkInterfaces(searchCtx, ec2Client, accountID, accountName, reg, targetIP); r != nil {
+						select {
+						case resultCh <- searchResult{result: r}:
+							cancel()
+						default:
+						}
+						return
 					}
-					return
-				}
+				} else {
+					// Public IP: check Elastic IPs then ENIs by association
+					if r := checkElasticIPs(searchCtx, ec2Client, accountID, accountName, reg, targetIP); r != nil {
+						select {
+						case resultCh <- searchResult{result: r}:
+							cancel()
+						default:
+						}
+						return
+					}
 
-				// Check network interfaces
-				if r := checkNetworkInterfaces(searchCtx, ec2Client, accountID, accountName, reg, targetIP); r != nil {
-					select {
-					case resultCh <- searchResult{result: r}:
-						cancel()
-					default:
+					if r := checkNetworkInterfaces(searchCtx, ec2Client, accountID, accountName, reg, targetIP); r != nil {
+						select {
+						case resultCh <- searchResult{result: r}:
+							cancel()
+						default:
+						}
+						return
 					}
-					return
 				}
 			}(ac, region)
 		}
@@ -262,7 +275,7 @@ func (a *AWSTenant) lookupViaSSO(ctx context.Context, targetIP string) (*AWSTena
 }
 
 // lookupViaProfiles searches using explicit AWS CLI profiles.
-func (a *AWSTenant) lookupViaProfiles(ctx context.Context, targetIP string) (*AWSTenantResult, error) {
+func (a *AWSTenant) lookupViaProfiles(ctx context.Context, targetIP string, isPrivate bool) (*AWSTenantResult, error) {
 	profiles := a.profiles
 	if len(profiles) == 0 {
 		profiles = []string{""} // default credential chain
@@ -307,22 +320,33 @@ func (a *AWSTenant) lookupViaProfiles(ctx context.Context, targetIP string) (*AW
 
 				client := ec2.NewFromConfig(cfg)
 
-				if r := checkElasticIPs(searchCtx, client, "", prof, reg, targetIP); r != nil {
-					select {
-					case resultCh <- searchResult{result: r}:
-						cancel()
-					default:
+				if isPrivate {
+					if r := checkPrivateNetworkInterfaces(searchCtx, client, "", prof, reg, targetIP); r != nil {
+						select {
+						case resultCh <- searchResult{result: r}:
+							cancel()
+						default:
+						}
+						return
 					}
-					return
-				}
+				} else {
+					if r := checkElasticIPs(searchCtx, client, "", prof, reg, targetIP); r != nil {
+						select {
+						case resultCh <- searchResult{result: r}:
+							cancel()
+						default:
+						}
+						return
+					}
 
-				if r := checkNetworkInterfaces(searchCtx, client, "", prof, reg, targetIP); r != nil {
-					select {
-					case resultCh <- searchResult{result: r}:
-						cancel()
-					default:
+					if r := checkNetworkInterfaces(searchCtx, client, "", prof, reg, targetIP); r != nil {
+						select {
+						case resultCh <- searchResult{result: r}:
+							cancel()
+						default:
+						}
+						return
 					}
-					return
 				}
 			}(profile, region)
 		}
@@ -473,6 +497,72 @@ func checkNetworkInterfaces(ctx context.Context, client *ec2.Client, accountID, 
 	if eni.Attachment != nil && eni.Attachment.InstanceId != nil {
 		result.InstanceID = *eni.Attachment.InstanceId
 		result.ResourceType = "EC2 Instance"
+	}
+
+	return result
+}
+
+// checkPrivateNetworkInterfaces searches ENIs by private IP address.
+func checkPrivateNetworkInterfaces(ctx context.Context, client *ec2.Client, accountID, accountName, region, targetIP string) *AWSTenantResult {
+	resp, err := client.DescribeNetworkInterfaces(ctx, &ec2.DescribeNetworkInterfacesInput{
+		Filters: []ec2types.Filter{
+			{
+				Name:   aws.String("addresses.private-ip-address"),
+				Values: []string{targetIP},
+			},
+		},
+	})
+	if err != nil || len(resp.NetworkInterfaces) == 0 {
+		return nil
+	}
+
+	eni := resp.NetworkInterfaces[0]
+	result := &AWSTenantResult{
+		Found:       true,
+		Region:      region,
+		AccountID:   accountID,
+		AccountName: accountName,
+		PrivateIP:   targetIP,
+		IPType:      "Private",
+	}
+
+	if eni.NetworkInterfaceId != nil {
+		result.NetworkInterfaceID = *eni.NetworkInterfaceId
+	}
+	if eni.Description != nil {
+		result.Description = *eni.Description
+	}
+	if eni.OwnerId != nil && accountID == "" {
+		result.AccountID = *eni.OwnerId
+	}
+	if eni.AvailabilityZone != nil {
+		result.AvailabilityZone = *eni.AvailabilityZone
+	}
+	if eni.VpcId != nil {
+		result.VPCID = *eni.VpcId
+	}
+	if eni.SubnetId != nil {
+		result.SubnetID = *eni.SubnetId
+	}
+
+	// Extract associated public IP if any
+	if eni.Association != nil && eni.Association.PublicIp != nil {
+		result.PublicIP = *eni.Association.PublicIp
+	}
+
+	result.ResourceType = classifyAWSInterface(eni.InterfaceType)
+
+	if eni.Attachment != nil && eni.Attachment.InstanceId != nil {
+		result.InstanceID = *eni.Attachment.InstanceId
+		result.ResourceType = "EC2 Instance"
+	}
+
+	// Extract Name tag from the ENI
+	for _, tag := range eni.TagSet {
+		if aws.ToString(tag.Key) == "Name" {
+			result.ResourceName = aws.ToString(tag.Value)
+			break
+		}
 	}
 
 	return result

@@ -9,6 +9,7 @@ import (
 // Result aggregates all intelligence gathered about an IP.
 type Result struct {
 	IP        string    `json:"ip"`
+	IsPrivate bool      `json:"is_private,omitempty"` // true for RFC 1918/link-local/loopback IPs
 	Timestamp time.Time `json:"timestamp"`
 
 	// Reverse DNS
@@ -271,6 +272,8 @@ type AzureTenantResult struct {
 	ResourceGroup      string `json:"resource_group,omitempty"`
 	ResourceID         string `json:"resource_id,omitempty"`
 	PublicIPName       string `json:"public_ip_name,omitempty"`
+	PrivateIP          string `json:"private_ip,omitempty"` // private IP of the NIC
+	PublicIP           string `json:"public_ip,omitempty"`  // associated public IP (when searching by private)
 	Location           string `json:"location,omitempty"`
 	AllocationMethod   string `json:"allocation_method,omitempty"` // Static or Dynamic
 	SKU                string `json:"sku,omitempty"`               // Basic or Standard
@@ -278,6 +281,9 @@ type AzureTenantResult struct {
 	AttachedTo         string `json:"attached_to,omitempty"`          // resource type (VM, LB, etc.)
 	AttachedResourceID string `json:"attached_resource_id,omitempty"` // full ARM ID
 	VMName             string `json:"vm_name,omitempty"`              // if attached to a VM
+	NICName            string `json:"nic_name,omitempty"`             // network interface name
+	VPCID              string `json:"vnet,omitempty"`                 // virtual network name
+	SubnetName         string `json:"subnet,omitempty"`               // subnet name
 }
 
 // --- AWS tenant results ---
@@ -307,4 +313,11 @@ type Provider interface {
 	Name() string
 	Lookup(ctx context.Context, ip net.IP) error
 	Apply(result *Result)
+}
+
+// PrivateIPProvider is implemented by providers that can look up private/RFC1918 IPs.
+// Providers that don't implement this interface are skipped for private IP lookups.
+type PrivateIPProvider interface {
+	Provider
+	SupportsPrivateIP() bool
 }

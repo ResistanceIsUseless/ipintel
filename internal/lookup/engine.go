@@ -73,18 +73,33 @@ func (e *Engine) Run(ctx context.Context, ipStr string) (*Result, error) {
 		return nil, fmt.Errorf("invalid IP address: %s", ipStr)
 	}
 
+	isPrivate := ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()
+
 	ctx, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 
 	result := &Result{
 		IP:        ipStr,
+		IsPrivate: isPrivate,
 		Timestamp: time.Now().UTC(),
+	}
+
+	// Filter providers for private IPs — only run providers that explicitly support it
+	providers := e.providers
+	if isPrivate {
+		var filtered []Provider
+		for _, p := range providers {
+			if pp, ok := p.(PrivateIPProvider); ok && pp.SupportsPrivateIP() {
+				filtered = append(filtered, p)
+			}
+		}
+		providers = filtered
 	}
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
-	for _, p := range e.providers {
+	for _, p := range providers {
 		wg.Add(1)
 		go func(prov Provider) {
 			defer wg.Done()

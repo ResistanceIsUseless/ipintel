@@ -108,11 +108,18 @@ func renderStyled(w io.Writer, result *lookup.Result) error {
 	var sb strings.Builder
 
 	// Header box
-	header := lipgloss.JoinVertical(lipgloss.Left,
+	headerLines := []string{
 		titleStyle.Render("IP Intelligence Report"),
 		lipgloss.NewStyle().Bold(true).Foreground(colorValue).PaddingLeft(1).Render(result.IP),
-		subtitleStyle.Render(result.Timestamp.Format("2006-01-02 15:04:05 UTC")),
-	)
+	}
+	if result.IsPrivate {
+		headerLines = append(headerLines, lipgloss.NewStyle().PaddingLeft(1).Render(
+			warnBadge.Render("PRIVATE IP")+" "+dimStyle.Render("(cloud tenant lookups only)"),
+		))
+	}
+	headerLines = append(headerLines, subtitleStyle.Render(result.Timestamp.Format("2006-01-02 15:04:05 UTC")))
+
+	header := lipgloss.JoinVertical(lipgloss.Left, headerLines...)
 	sb.WriteString(boxStyle.Render(header))
 	sb.WriteString("\n")
 
@@ -896,6 +903,15 @@ func renderAzureTenant(az *lookup.AzureTenantResult) string {
 	if az.PublicIPName != "" {
 		rows = append(rows, []string{"Public IP Name", az.PublicIPName})
 	}
+	if az.PrivateIP != "" {
+		rows = append(rows, []string{"Private IP", az.PrivateIP})
+	}
+	if az.PublicIP != "" {
+		rows = append(rows, []string{"Public IP", az.PublicIP})
+	}
+	if az.NICName != "" {
+		rows = append(rows, []string{"NIC", az.NICName})
+	}
 	if az.Location != "" {
 		rows = append(rows, []string{"Location", az.Location})
 	}
@@ -907,6 +923,12 @@ func renderAzureTenant(az *lookup.AzureTenantResult) string {
 	}
 	if az.FQDN != "" {
 		rows = append(rows, []string{"FQDN", az.FQDN})
+	}
+	if az.VPCID != "" {
+		rows = append(rows, []string{"VNet", az.VPCID})
+	}
+	if az.SubnetName != "" {
+		rows = append(rows, []string{"Subnet", az.SubnetName})
 	}
 	if az.AttachedTo != "" {
 		rows = append(rows, []string{"Attached To", az.AttachedTo})
@@ -954,14 +976,18 @@ func renderAWSTenant(aw *lookup.AWSTenantResult) string {
 	if aw.IPType != "" {
 		rows = append(rows, []string{"IP Type", aw.IPType})
 	}
+	if aw.PublicIP != "" {
+		rows = append(rows, []string{"Public IP", aw.PublicIP})
+	}
+	if aw.PrivateIP != "" && aw.IPType != "Private" {
+		// Only show private IP for public IP lookups (where it's supplemental info)
+		rows = append(rows, []string{"Private IP", aw.PrivateIP})
+	}
 	if aw.InstanceID != "" {
 		rows = append(rows, []string{"Instance ID", aw.InstanceID})
 	}
 	if aw.NetworkInterfaceID != "" {
 		rows = append(rows, []string{"ENI", aw.NetworkInterfaceID})
-	}
-	if aw.PrivateIP != "" {
-		rows = append(rows, []string{"Private IP", aw.PrivateIP})
 	}
 	if aw.AvailabilityZone != "" {
 		rows = append(rows, []string{"AZ", aw.AvailabilityZone})
