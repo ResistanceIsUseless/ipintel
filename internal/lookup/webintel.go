@@ -14,8 +14,10 @@ import (
 )
 
 // WebIntel grabs TLS certificate info and HTTP metadata from open web ports.
+// Implements HostnameAwareProvider to use discovered hostnames for SNI and Host headers.
 type WebIntel struct {
-	result *WebIntelResult
+	result    *WebIntelResult
+	hostnames []string // set by engine phase-2 via SetHostnames
 }
 
 func NewWebIntel() *WebIntel {
@@ -24,26 +26,60 @@ func NewWebIntel() *WebIntel {
 
 func (w *WebIntel) Name() string { return "web_intel" }
 
+func (w *WebIntel) SetHostnames(hostnames []string) {
+	w.hostnames = hostnames
+}
+
 func (w *WebIntel) Lookup(ctx context.Context, ip net.IP) error {
 	w.result = &WebIntelResult{}
 
-	// Try TLS on 443 first, fall back to 8443
-	tlsInfo := probeTLS(ctx, ip, 443)
+	// --- TLS probing ---
+	// Try with raw IP first (no SNI)
+	tlsInfo := probeTLS(ctx, ip, 443, "")
 	if tlsInfo == nil {
-		tlsInfo = probeTLS(ctx, ip, 8443)
+		tlsInfo = probeTLS(ctx, ip, 8443, "")
+	}
+
+	// Try each discovered hostname with SNI — prefer the first one that yields
+	// a different (potentially more specific) certificate
+	for _, hostname := range w.hostnames {
+		if sniTLS := probeTLS(ctx, ip, 443, hostname); sniTLS != nil {
+			if tlsBetter(sniTLS, tlsInfo) {
+				tlsInfo = sniTLS
+				break
+			}
+		}
 	}
 	w.result.TLS = tlsInfo
 
-	// Try HTTP(S) metadata
-	httpInfo := probeHTTP(ctx, ip, true, 443) // HTTPS first
+	// --- HTTP probing ---
+	// Try raw IP first
+	httpInfo := probeHTTP(ctx, ip, true, 443, "")
 	if httpInfo == nil {
-		httpInfo = probeHTTP(ctx, ip, false, 80) // fallback to HTTP
+		httpInfo = probeHTTP(ctx, ip, false, 80, "")
 	}
 	if httpInfo == nil {
-		httpInfo = probeHTTP(ctx, ip, true, 8443)
+		httpInfo = probeHTTP(ctx, ip, true, 8443, "")
 	}
 	if httpInfo == nil {
-		httpInfo = probeHTTP(ctx, ip, false, 8080)
+		httpInfo = probeHTTP(ctx, ip, false, 8080, "")
+	}
+
+	// Try with discovered hostnames — prefer the first one that gives a
+	// non-default/richer response (e.g., a real page title, 200 instead of 4xx)
+	for _, hostname := range w.hostnames {
+		if hostHTTP := probeHTTP(ctx, ip, true, 443, hostname); hostHTTP != nil {
+			if httpBetter(hostHTTP, httpInfo) {
+				httpInfo = hostHTTP
+				break
+			}
+		}
+		if hostHTTP := probeHTTP(ctx, ip, false, 80, hostname); hostHTTP != nil {
+			if httpBetter(hostHTTP, httpInfo) {
+				httpInfo = hostHTTP
+				break
+			}
+		}
 	}
 	w.result.HTTP = httpInfo
 
@@ -59,14 +95,54 @@ func (w *WebIntel) Apply(result *Result) {
 	result.WebIntel = w.result
 }
 
+// tlsBetter returns true if candidate is a better TLS result than current.
+// Prefers: non-nil over nil, non-expired over expired, more SANs.
+func tlsBetter(candidate, current *TLSInfo) bool {
+	if current == nil {
+		return true
+	}
+	// Prefer non-expired certs
+	if current.Expired && !candidate.Expired {
+		return true
+	}
+	// Prefer certs with more SANs (likely the real service cert)
+	if len(candidate.SANs) > len(current.SANs) {
+		return true
+	}
+	return false
+}
+
+// httpBetter returns true if candidate is a better HTTP result than current.
+// Prefers: non-nil over nil, 200 over non-200, responses with a title.
+func httpBetter(candidate, current *HTTPInfo) bool {
+	if current == nil {
+		return true
+	}
+	// Prefer 200 OK over error codes
+	if current.StatusCode != 200 && candidate.StatusCode == 200 {
+		return true
+	}
+	// Prefer responses with a page title
+	if current.Title == "" && candidate.Title != "" {
+		return true
+	}
+	return false
+}
+
 // probeTLS connects to a port via TLS and extracts certificate info.
-func probeTLS(ctx context.Context, ip net.IP, port int) *TLSInfo {
-	addr := fmt.Sprintf("%s:%d", ip.String(), port)
+// If serverName is non-empty, it is set as SNI in the TLS Client Hello.
+func probeTLS(ctx context.Context, ip net.IP, port int, serverName string) *TLSInfo {
+	addr := net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port))
+
+	tlsCfg := &tls.Config{
+		InsecureSkipVerify: true, // we want the cert even if it doesn't match
+	}
+	if serverName != "" {
+		tlsCfg.ServerName = serverName
+	}
 
 	dialer := &tls.Dialer{
-		Config: &tls.Config{
-			InsecureSkipVerify: true, // we want the cert even if it doesn't match
-		},
+		Config: tlsCfg,
 		NetDialer: &net.Dialer{
 			Timeout: 5 * time.Second,
 		},
@@ -124,24 +200,50 @@ func probeTLS(ctx context.Context, ip net.IP, port int) *TLSInfo {
 	return info
 }
 
-// probeHTTP makes a HEAD/GET request and extracts server info.
-func probeHTTP(ctx context.Context, ip net.IP, useTLS bool, port int) *HTTPInfo {
+// probeHTTP makes a GET request and extracts server info.
+// If hostname is non-empty, the request URL uses the hostname (for proper
+// virtual hosting) while a custom DialContext forces the TCP connection to
+// the actual IP address.
+func probeHTTP(ctx context.Context, ip net.IP, useTLS bool, port int, hostname string) *HTTPInfo {
 	scheme := "http"
 	if useTLS {
 		scheme = "https"
 	}
-	url := fmt.Sprintf("%s://%s:%d/", scheme, ip.String(), port)
+
+	// Determine the host portion of the URL
+	host := ip.String()
+	if hostname != "" {
+		host = hostname
+	}
+	url := fmt.Sprintf("%s://%s:%d/", scheme, host, port)
+
+	transport := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+		DialContext: (&net.Dialer{
+			Timeout: 3 * time.Second,
+		}).DialContext,
+	}
+
+	// When using a hostname, force all TCP connections to go to the actual IP
+	// so we probe the right server even though the URL has the hostname.
+	if hostname != "" {
+		ipAddr := ip.String()
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// Replace the hostname:port with ip:port
+			_, portStr, _ := net.SplitHostPort(addr)
+			return (&net.Dialer{
+				Timeout: 3 * time.Second,
+			}).DialContext(ctx, network, net.JoinHostPort(ipAddr, portStr))
+		}
+		// Also set ServerName for TLS so the SNI matches the Host header
+		transport.TLSClientConfig.ServerName = hostname
+	}
 
 	client := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: true,
-			},
-			DialContext: (&net.Dialer{
-				Timeout: 3 * time.Second,
-			}).DialContext,
-		},
+		Timeout:   5 * time.Second,
+		Transport: transport,
 		// Don't follow redirects - capture the redirect itself
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse

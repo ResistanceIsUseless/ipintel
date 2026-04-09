@@ -60,6 +60,30 @@ type Result struct {
 	// AWS tenant lookup (authenticated)
 	AWSTenant *AWSTenantResult `json:"aws_tenant,omitempty"`
 
+	// GCP tenant lookup (authenticated)
+	GCPTenant *GCPTenantResult `json:"gcp_tenant,omitempty"`
+
+	// JARM TLS fingerprinting (active)
+	JARM *JARMResult `json:"jarm,omitempty"`
+
+	// UDP port scan
+	UDPScan *UDPScanResult `json:"udp_scan,omitempty"`
+
+	// AlienVault OTX
+	AlienVault *AlienVaultResult `json:"alienvault,omitempty"`
+
+	// Censys host intelligence
+	Censys *CensysResult `json:"censys,omitempty"`
+
+	// IPinfo.io (VPN/proxy/Tor/relay detection)
+	IPInfo *IPInfoResult `json:"ipinfo,omitempty"`
+
+	// ThreatFox (abuse.ch) IOC search
+	ThreatFox *ThreatFoxResult `json:"threatfox,omitempty"`
+
+	// Tech stack detection (Wappalyzer)
+	TechStack *TechStackResult `json:"tech_stack,omitempty"`
+
 	// Errors from individual providers (non-fatal)
 	Errors []ProviderError `json:"errors,omitempty"`
 }
@@ -321,4 +345,148 @@ type Provider interface {
 type PrivateIPProvider interface {
 	Provider
 	SupportsPrivateIP() bool
+}
+
+// HostnameAwareProvider is implemented by providers that benefit from knowing
+// hostnames discovered by earlier providers (rDNS, crt.sh, forward DNS, etc.).
+// The engine runs these providers in a second phase after hostname-producing
+// providers have completed, calling SetHostnames with the aggregated list
+// before invoking Lookup.
+type HostnameAwareProvider interface {
+	Provider
+	SetHostnames(hostnames []string)
+}
+
+// --- GCP tenant results ---
+
+type GCPTenantResult struct {
+	Found        bool   `json:"found"`
+	ProjectID    string `json:"project_id,omitempty"`
+	Region       string `json:"region,omitempty"`
+	Zone         string `json:"zone,omitempty"`
+	InstanceName string `json:"instance_name,omitempty"`
+	PublicIP     string `json:"public_ip,omitempty"`
+	PrivateIP    string `json:"private_ip,omitempty"`
+	IPName       string `json:"ip_name,omitempty"`
+	IPType       string `json:"ip_type,omitempty"` // "EXTERNAL", "INTERNAL", etc.
+	Status       string `json:"status,omitempty"`
+	Scope        string `json:"scope,omitempty"` // "global" or "regional"
+	Subnet       string `json:"subnet,omitempty"`
+	Network      string `json:"network,omitempty"`
+	ResourceType string `json:"resource_type,omitempty"` // "Address", "Instance", "ForwardingRule"
+	AttachedTo   string `json:"attached_to,omitempty"`
+}
+
+// --- JARM fingerprinting results ---
+
+type JARMResult struct {
+	Fingerprint string `json:"fingerprint"`
+	Port        int    `json:"port,omitempty"` // port that produced the fingerprint
+}
+
+// --- UDP scan results ---
+
+type UDPScanResult struct {
+	OpenPorts []UDPPortInfo `json:"open_ports,omitempty"`
+	ScanTime  string        `json:"scan_time,omitempty"`
+}
+
+type UDPPortInfo struct {
+	Port          int    `json:"port"`
+	Service       string `json:"service,omitempty"`
+	ResponseSize  int    `json:"response_size,omitempty"`
+	Amplification bool   `json:"amplification,omitempty"`
+	AmpFactor     string `json:"amp_factor,omitempty"` // e.g., "4.2x"
+}
+
+// --- AlienVault OTX results ---
+
+type AlienVaultResult struct {
+	PulseCount int        `json:"pulse_count"`
+	Reputation int        `json:"reputation,omitempty"`
+	Country    string     `json:"country,omitempty"`
+	ASN        string     `json:"asn,omitempty"`
+	Link       string     `json:"link,omitempty"`
+	Pulses     []OTXPulse `json:"pulses,omitempty"`
+	Tags       []string   `json:"tags,omitempty"`
+}
+
+type OTXPulse struct {
+	Name     string   `json:"name"`
+	Created  string   `json:"created,omitempty"`
+	Tags     []string `json:"tags,omitempty"`
+	Modified string   `json:"modified,omitempty"`
+}
+
+// --- Censys results ---
+
+type CensysResult struct {
+	Services        int             `json:"services"`
+	LastUpdated     string          `json:"last_updated,omitempty"`
+	OperatingSystem string          `json:"operating_system,omitempty"`
+	ASN             int             `json:"asn,omitempty"`
+	ASName          string          `json:"as_name,omitempty"`
+	Country         string          `json:"country,omitempty"`
+	Link            string          `json:"link,omitempty"`
+	OpenPorts       []CensysService `json:"open_ports,omitempty"`
+}
+
+type CensysService struct {
+	Port        int    `json:"port"`
+	Protocol    string `json:"protocol,omitempty"`
+	ServiceName string `json:"service_name,omitempty"`
+	Certificate string `json:"certificate,omitempty"` // subject CN
+}
+
+// --- IPinfo.io results ---
+
+type IPInfoResult struct {
+	Hostname       string `json:"hostname,omitempty"`
+	City           string `json:"city,omitempty"`
+	Region         string `json:"region,omitempty"`
+	Country        string `json:"country,omitempty"`
+	Loc            string `json:"loc,omitempty"` // lat,lon
+	Org            string `json:"org,omitempty"`
+	Timezone       string `json:"timezone,omitempty"`
+	Postal         string `json:"postal,omitempty"`
+	IsVPN          bool   `json:"is_vpn,omitempty"`
+	IsProxy        bool   `json:"is_proxy,omitempty"`
+	IsTor          bool   `json:"is_tor,omitempty"`
+	IsRelay        bool   `json:"is_relay,omitempty"`
+	IsHosting      bool   `json:"is_hosting,omitempty"`
+	PrivacyService string `json:"privacy_service,omitempty"`
+}
+
+// --- ThreatFox (abuse.ch) results ---
+
+type ThreatFoxResult struct {
+	IOCCount        int            `json:"ioc_count"`
+	Link            string         `json:"link,omitempty"`
+	IOCs            []ThreatFoxIOC `json:"iocs,omitempty"`
+	MalwareFamilies []string       `json:"malware_families,omitempty"`
+	ThreatTypes     []string       `json:"threat_types,omitempty"`
+}
+
+type ThreatFoxIOC struct {
+	Type         string   `json:"type,omitempty"`
+	Malware      string   `json:"malware,omitempty"`
+	MalwareAlias string   `json:"malware_alias,omitempty"`
+	Confidence   int      `json:"confidence,omitempty"`
+	FirstSeen    string   `json:"first_seen,omitempty"`
+	LastSeen     string   `json:"last_seen,omitempty"`
+	Reporter     string   `json:"reporter,omitempty"`
+	Tags         []string `json:"tags,omitempty"`
+}
+
+// --- Tech stack detection results ---
+
+type TechStackResult struct {
+	Technologies []TechMatch `json:"technologies,omitempty"`
+	URL          string      `json:"url,omitempty"` // URL that was analyzed
+}
+
+type TechMatch struct {
+	Name       string   `json:"name"`
+	Categories []string `json:"categories,omitempty"`
+	Version    string   `json:"version,omitempty"`
 }
