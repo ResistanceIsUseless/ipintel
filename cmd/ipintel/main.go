@@ -10,10 +10,10 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/ResistanceIsUseless/ipintel/internal/config"
+	"github.com/ResistanceIsUseless/ipintel/internal/lookup"
+	"github.com/ResistanceIsUseless/ipintel/internal/output"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mgriffiths/ipintel/internal/config"
-	"github.com/mgriffiths/ipintel/internal/lookup"
-	"github.com/mgriffiths/ipintel/internal/output"
 )
 
 var (

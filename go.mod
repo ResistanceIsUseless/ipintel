@@ -1,4 +1,4 @@
-module github.com/mgriffiths/ipintel
+module github.com/ResistanceIsUseless/ipintel
 
 go 1.26.1
 

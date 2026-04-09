@@ -9,8 +9,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mgriffiths/ipintel/internal/cache"
-	"github.com/mgriffiths/ipintel/internal/config"
+	"github.com/ResistanceIsUseless/ipintel/internal/cache"
+	"github.com/ResistanceIsUseless/ipintel/internal/config"
 )
 
 // Engine orchestrates all providers and runs lookups.

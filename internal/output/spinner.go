@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ResistanceIsUseless/ipintel/internal/config"
+	"github.com/ResistanceIsUseless/ipintel/internal/lookup"
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/mgriffiths/ipintel/internal/config"
-	"github.com/mgriffiths/ipintel/internal/lookup"
 )
 
 // RunWithSpinner runs the lookup engine with an animated spinner UI.

@@ -7,9 +7,9 @@ import (
 	"io"
 	"strings"
 
+	"github.com/ResistanceIsUseless/ipintel/internal/lookup"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/lipgloss/table"
-	"github.com/mgriffiths/ipintel/internal/lookup"
 )
 
 // Format controls the output format.
