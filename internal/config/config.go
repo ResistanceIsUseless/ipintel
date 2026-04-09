@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Config holds all API keys and settings.
@@ -26,9 +27,31 @@ type Config struct {
 	AWSRegions   []string // regions to search (empty = all major regions)
 	AWSEnabled   bool
 
+	// GCP: uses Application Default Credentials (gcloud auth application-default login).
+	// Searches specified projects and regions for IP allocation.
+	GCPEnabled  bool
+	GCPProjects []string // project IDs to search
+	GCPRegions  []string // regions to search (empty = all)
+
+	// AlienVault OTX (optional key for higher rate limits)
+	AlienVaultAPIKey string
+
+	// Censys (requires API ID + Secret for authenticated access)
+	CensysAPIID     string
+	CensysAPISecret string
+
+	// IPinfo.io (requires API token)
+	IPInfoAPIKey string
+
 	// Runtime overrides (set via CLI flags, not env)
 	SkipAWS   bool
 	SkipAzure bool
+	SkipGCP   bool
+
+	// Cache settings
+	CacheEnabled bool
+	CacheDir     string        // override cache directory (default: ~/.cache/ipintel)
+	CacheTTL     time.Duration // override cache TTL (default: 24h)
 }
 
 // Load reads configuration from environment variables.
@@ -80,6 +103,27 @@ func Load() *Config {
 		}
 	}
 
+	// GCP: enabled if GCP_TENANT_ENABLED=true or GCP_PROJECTS is set
+	cfg.GCPEnabled = os.Getenv("GCP_TENANT_ENABLED") == "true" ||
+		os.Getenv("GCP_PROJECTS") != ""
+	cfg.GCPProjects = parseCSVEnv("GCP_PROJECTS")
+	cfg.GCPRegions = parseCSVEnv("GCP_REGIONS")
+
+	// AlienVault OTX
+	cfg.AlienVaultAPIKey = os.Getenv("ALIENVAULT_API_KEY")
+
+	// Censys
+	cfg.CensysAPIID = os.Getenv("CENSYS_API_ID")
+	cfg.CensysAPISecret = os.Getenv("CENSYS_API_SECRET")
+
+	// IPinfo.io
+	cfg.IPInfoAPIKey = os.Getenv("IPINFO_API_KEY")
+
+	// Cache: enabled by default, can be disabled with IPINTEL_CACHE=false
+	cacheEnv := os.Getenv("IPINTEL_CACHE")
+	cfg.CacheEnabled = cacheEnv != "false" && cacheEnv != "0"
+	cfg.CacheDir = os.Getenv("IPINTEL_CACHE_DIR") // empty = default (~/.cache/ipintel)
+
 	return cfg
 }
 
@@ -114,6 +158,29 @@ func (c *Config) HasAzureTenant() bool {
 // Searches across all configured profiles and regions.
 func (c *Config) HasAWSTenant() bool {
 	return c.AWSEnabled && !c.SkipAWS
+}
+
+// HasGCPTenant returns true if GCP tenant lookup is enabled.
+// Uses Application Default Credentials to search projects.
+func (c *Config) HasGCPTenant() bool {
+	return c.GCPEnabled && !c.SkipGCP
+}
+
+// HasAlienVault returns true if AlienVault OTX is configured.
+// AlienVault works without a key (lower rate limits), but we only enable
+// when explicitly configured to avoid unnecessary API calls.
+func (c *Config) HasAlienVault() bool {
+	return c.AlienVaultAPIKey != ""
+}
+
+// HasCensys returns true if Censys API credentials are configured.
+func (c *Config) HasCensys() bool {
+	return c.CensysAPIID != "" && c.CensysAPISecret != ""
+}
+
+// HasIPInfo returns true if an IPinfo.io API key is configured.
+func (c *Config) HasIPInfo() bool {
+	return c.IPInfoAPIKey != ""
 }
 
 // LoadDotEnv is a simple .env file loader. It reads key=value pairs

@@ -95,7 +95,7 @@ func (p *PortScanner) Apply(result *Result) {
 }
 
 func probePort(ctx context.Context, ip net.IP, port int, service string) *PortInfo {
-	addr := fmt.Sprintf("%s:%d", ip.String(), port)
+	addr := net.JoinHostPort(ip.String(), fmt.Sprintf("%d", port))
 
 	d := net.Dialer{Timeout: 3 * time.Second}
 	conn, err := d.DialContext(ctx, "tcp", addr)

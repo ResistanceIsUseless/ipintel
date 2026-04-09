@@ -1,6 +1,7 @@
 package output
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,8 +16,12 @@ import (
 type Format string
 
 const (
-	FormatTable Format = "table"
-	FormatJSON  Format = "json"
+	FormatTable     Format = "table"
+	FormatJSON      Format = "json"
+	FormatMarkdown  Format = "markdown"
+	FormatCSV       Format = "csv"
+	FormatCSVHeader Format = "csv-header" // CSV with header row (first entry in bulk)
+	FormatQuiet     Format = "quiet"      // single-line grepable output
 )
 
 // Color palette
@@ -93,6 +98,14 @@ func Render(w io.Writer, result *lookup.Result, format Format) error {
 	switch format {
 	case FormatJSON:
 		return renderJSON(w, result)
+	case FormatMarkdown:
+		return renderMarkdown(w, result)
+	case FormatCSV:
+		return renderCSV(w, result, false)
+	case FormatCSVHeader:
+		return renderCSV(w, result, true)
+	case FormatQuiet:
+		return renderQuiet(w, result)
 	default:
 		return renderStyled(w, result)
 	}
@@ -102,6 +115,362 @@ func renderJSON(w io.Writer, result *lookup.Result) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(result)
+}
+
+func renderMarkdown(w io.Writer, result *lookup.Result) error {
+	var sb strings.Builder
+
+	sb.WriteString(fmt.Sprintf("# IP Intelligence Report: %s\n\n", result.IP))
+	sb.WriteString(fmt.Sprintf("**Timestamp:** %s\n\n", result.Timestamp.Format("2006-01-02 15:04:05 UTC")))
+	if result.IsPrivate {
+		sb.WriteString("> **Note:** Private IP (cloud tenant lookups only)\n\n")
+	}
+
+	// Reverse DNS
+	if len(result.ReverseDNS) > 0 {
+		sb.WriteString("## Reverse DNS\n\n")
+		for _, name := range result.ReverseDNS {
+			sb.WriteString(fmt.Sprintf("- `%s`\n", name))
+		}
+		sb.WriteString("\n")
+	}
+
+	// ASN
+	if result.ASN != nil {
+		a := result.ASN
+		sb.WriteString("## ASN\n\n")
+		sb.WriteString(fmt.Sprintf("| Field | Value |\n|---|---|\n"))
+		if a.Number != "" {
+			sb.WriteString(fmt.Sprintf("| AS Number | %s |\n", a.Number))
+		}
+		if a.Name != "" {
+			sb.WriteString(fmt.Sprintf("| AS Name | %s |\n", a.Name))
+		}
+		if a.CIDR != "" {
+			sb.WriteString(fmt.Sprintf("| Prefix | %s |\n", a.CIDR))
+		}
+		if a.Country != "" {
+			sb.WriteString(fmt.Sprintf("| Country | %s |\n", a.Country))
+		}
+		sb.WriteString("\n")
+	}
+
+	// RDAP
+	if result.RDAP != nil {
+		r := result.RDAP
+		sb.WriteString("## RDAP / Registration\n\n")
+		sb.WriteString("| Field | Value |\n|---|---|\n")
+		mdRow := func(label, value string) {
+			if value != "" {
+				sb.WriteString(fmt.Sprintf("| %s | %s |\n", label, value))
+			}
+		}
+		mdRow("Network", r.Name)
+		mdRow("CIDR", r.CIDR)
+		mdRow("Organization", r.OrgName)
+		mdRow("Country", r.Country)
+		mdRow("RIR", r.Source)
+		mdRow("Abuse Contact", r.AbuseEmail)
+		sb.WriteString("\n")
+	}
+
+	// Cloud
+	if result.Cloud != nil {
+		sb.WriteString("## Cloud Provider\n\n")
+		sb.WriteString(fmt.Sprintf("**%s**", result.Cloud.Provider))
+		if result.Cloud.Service != "" {
+			sb.WriteString(fmt.Sprintf(" — %s", result.Cloud.Service))
+		}
+		if result.Cloud.Region != "" {
+			sb.WriteString(fmt.Sprintf(" (%s)", result.Cloud.Region))
+		}
+		sb.WriteString("\n\n")
+	}
+
+	// Ports
+	if result.Ports != nil && len(result.Ports.OpenPorts) > 0 {
+		sb.WriteString("## Open Ports (TCP)\n\n")
+		sb.WriteString("| Port | Protocol | Service | Banner |\n|---|---|---|---|\n")
+		for _, p := range result.Ports.OpenPorts {
+			banner := p.Banner
+			if len(banner) > 40 {
+				banner = banner[:40] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("| %d | %s | %s | %s |\n", p.Port, p.Protocol, p.Service, banner))
+		}
+		sb.WriteString("\n")
+	}
+
+	// Threat Intel summary
+	sb.WriteString("## Threat Intelligence\n\n")
+	sb.WriteString("| Source | Finding |\n|---|---|\n")
+
+	if result.GreyNoise != nil {
+		if result.GreyNoise.Seen {
+			sb.WriteString(fmt.Sprintf("| GreyNoise | %s |\n", result.GreyNoise.Classification))
+		} else {
+			sb.WriteString("| GreyNoise | Not observed |\n")
+		}
+	}
+	if result.AbuseIPDB != nil {
+		sb.WriteString(fmt.Sprintf("| AbuseIPDB | Score: %d%%, Reports: %d |\n", result.AbuseIPDB.AbuseScore, result.AbuseIPDB.TotalReports))
+	}
+	if result.VirusTotal != nil && result.VirusTotal.TotalEngines > 0 {
+		sb.WriteString(fmt.Sprintf("| VirusTotal | %d/%d detections, reputation: %d |\n",
+			result.VirusTotal.Malicious+result.VirusTotal.Suspicious, result.VirusTotal.TotalEngines, result.VirusTotal.Reputation))
+	}
+	if result.AlienVault != nil {
+		sb.WriteString(fmt.Sprintf("| AlienVault | %d pulses |\n", result.AlienVault.PulseCount))
+	}
+	if result.ThreatFox != nil {
+		sb.WriteString(fmt.Sprintf("| ThreatFox | %d IOCs |\n", result.ThreatFox.IOCCount))
+	}
+	if result.IPInfo != nil {
+		flags := []string{}
+		if result.IPInfo.IsVPN {
+			flags = append(flags, "VPN")
+		}
+		if result.IPInfo.IsProxy {
+			flags = append(flags, "Proxy")
+		}
+		if result.IPInfo.IsTor {
+			flags = append(flags, "Tor")
+		}
+		if result.IPInfo.IsRelay {
+			flags = append(flags, "Relay")
+		}
+		if len(flags) > 0 {
+			sb.WriteString(fmt.Sprintf("| IPinfo | %s |\n", strings.Join(flags, ", ")))
+		}
+	}
+	sb.WriteString("\n")
+
+	// Tenant lookups
+	if result.AzureTenant != nil && result.AzureTenant.Found {
+		sb.WriteString("## Azure Tenant\n\n")
+		sb.WriteString(fmt.Sprintf("**Found** in subscription `%s`, resource group `%s`\n\n", result.AzureTenant.SubscriptionID, result.AzureTenant.ResourceGroup))
+	}
+	if result.AWSTenant != nil && result.AWSTenant.Found {
+		sb.WriteString("## AWS Tenant\n\n")
+		acct := result.AWSTenant.AccountID
+		if result.AWSTenant.AccountName != "" {
+			acct = result.AWSTenant.AccountName + " (" + acct + ")"
+		}
+		sb.WriteString(fmt.Sprintf("**Found** in account %s, region `%s`\n\n", acct, result.AWSTenant.Region))
+	}
+	if result.GCPTenant != nil && result.GCPTenant.Found {
+		sb.WriteString("## GCP Tenant\n\n")
+		sb.WriteString(fmt.Sprintf("**Found** in project `%s`\n\n", result.GCPTenant.ProjectID))
+	}
+
+	// Errors
+	if len(result.Errors) > 0 {
+		sb.WriteString("## Provider Errors\n\n")
+		for _, e := range result.Errors {
+			sb.WriteString(fmt.Sprintf("- **%s:** %s\n", e.Provider, e.Error))
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("---\n")
+	fmt.Fprint(w, sb.String())
+	return nil
+}
+
+func renderCSV(w io.Writer, result *lookup.Result, includeHeader bool) error {
+	cw := csv.NewWriter(w)
+	defer cw.Flush()
+
+	if includeHeader {
+		cw.Write([]string{
+			"ip", "timestamp", "is_private",
+			"reverse_dns", "asn", "as_name", "as_cidr",
+			"rdap_org", "rdap_country", "rdap_abuse_email",
+			"cloud_provider", "cloud_service", "cloud_region",
+			"greynoise_seen", "greynoise_class",
+			"abuseipdb_score", "abuseipdb_reports",
+			"vt_malicious", "vt_suspicious", "vt_reputation",
+			"alienvault_pulses", "threatfox_iocs",
+			"ipinfo_vpn", "ipinfo_proxy", "ipinfo_tor",
+			"azure_found", "aws_found", "gcp_found",
+			"open_ports",
+		})
+	}
+
+	// Helper for booleans
+	boolStr := func(b bool) string {
+		if b {
+			return "true"
+		}
+		return "false"
+	}
+
+	row := []string{
+		result.IP,
+		result.Timestamp.Format("2006-01-02T15:04:05Z"),
+		boolStr(result.IsPrivate),
+	}
+
+	// Reverse DNS
+	row = append(row, strings.Join(result.ReverseDNS, ";"))
+
+	// ASN
+	if result.ASN != nil {
+		row = append(row, result.ASN.Number, result.ASN.Name, result.ASN.CIDR)
+	} else {
+		row = append(row, "", "", "")
+	}
+
+	// RDAP
+	if result.RDAP != nil {
+		row = append(row, result.RDAP.OrgName, result.RDAP.Country, result.RDAP.AbuseEmail)
+	} else {
+		row = append(row, "", "", "")
+	}
+
+	// Cloud
+	if result.Cloud != nil {
+		row = append(row, result.Cloud.Provider, result.Cloud.Service, result.Cloud.Region)
+	} else {
+		row = append(row, "", "", "")
+	}
+
+	// GreyNoise
+	if result.GreyNoise != nil {
+		row = append(row, boolStr(result.GreyNoise.Seen), result.GreyNoise.Classification)
+	} else {
+		row = append(row, "", "")
+	}
+
+	// AbuseIPDB
+	if result.AbuseIPDB != nil {
+		row = append(row, fmt.Sprintf("%d", result.AbuseIPDB.AbuseScore), fmt.Sprintf("%d", result.AbuseIPDB.TotalReports))
+	} else {
+		row = append(row, "", "")
+	}
+
+	// VirusTotal
+	if result.VirusTotal != nil {
+		row = append(row, fmt.Sprintf("%d", result.VirusTotal.Malicious), fmt.Sprintf("%d", result.VirusTotal.Suspicious), fmt.Sprintf("%d", result.VirusTotal.Reputation))
+	} else {
+		row = append(row, "", "", "")
+	}
+
+	// AlienVault
+	if result.AlienVault != nil {
+		row = append(row, fmt.Sprintf("%d", result.AlienVault.PulseCount))
+	} else {
+		row = append(row, "")
+	}
+
+	// ThreatFox
+	if result.ThreatFox != nil {
+		row = append(row, fmt.Sprintf("%d", result.ThreatFox.IOCCount))
+	} else {
+		row = append(row, "")
+	}
+
+	// IPinfo privacy
+	if result.IPInfo != nil {
+		row = append(row, boolStr(result.IPInfo.IsVPN), boolStr(result.IPInfo.IsProxy), boolStr(result.IPInfo.IsTor))
+	} else {
+		row = append(row, "", "", "")
+	}
+
+	// Tenant lookups
+	if result.AzureTenant != nil {
+		row = append(row, boolStr(result.AzureTenant.Found))
+	} else {
+		row = append(row, "")
+	}
+	if result.AWSTenant != nil {
+		row = append(row, boolStr(result.AWSTenant.Found))
+	} else {
+		row = append(row, "")
+	}
+	if result.GCPTenant != nil {
+		row = append(row, boolStr(result.GCPTenant.Found))
+	} else {
+		row = append(row, "")
+	}
+
+	// Open ports
+	if result.Ports != nil && len(result.Ports.OpenPorts) > 0 {
+		ports := make([]string, len(result.Ports.OpenPorts))
+		for i, p := range result.Ports.OpenPorts {
+			ports[i] = fmt.Sprintf("%d/%s", p.Port, p.Protocol)
+		}
+		row = append(row, strings.Join(ports, ";"))
+	} else {
+		row = append(row, "")
+	}
+
+	cw.Write(row)
+	return nil
+}
+
+func renderQuiet(w io.Writer, result *lookup.Result) error {
+	// Single-line output: ip [flags] [threat-scores] [cloud]
+	var parts []string
+	parts = append(parts, result.IP)
+
+	// Cloud provider
+	if result.Cloud != nil {
+		parts = append(parts, fmt.Sprintf("cloud=%s", result.Cloud.Provider))
+	}
+
+	// Threat scores
+	if result.AbuseIPDB != nil && result.AbuseIPDB.AbuseScore > 0 {
+		parts = append(parts, fmt.Sprintf("abuse=%d%%", result.AbuseIPDB.AbuseScore))
+	}
+	if result.VirusTotal != nil && result.VirusTotal.Malicious > 0 {
+		parts = append(parts, fmt.Sprintf("vt_mal=%d", result.VirusTotal.Malicious))
+	}
+	if result.GreyNoise != nil && result.GreyNoise.Seen {
+		parts = append(parts, fmt.Sprintf("greynoise=%s", result.GreyNoise.Classification))
+	}
+	if result.AlienVault != nil && result.AlienVault.PulseCount > 0 {
+		parts = append(parts, fmt.Sprintf("otx_pulses=%d", result.AlienVault.PulseCount))
+	}
+	if result.ThreatFox != nil && result.ThreatFox.IOCCount > 0 {
+		parts = append(parts, fmt.Sprintf("threatfox=%d", result.ThreatFox.IOCCount))
+	}
+
+	// Privacy flags
+	if result.IPInfo != nil {
+		if result.IPInfo.IsVPN {
+			parts = append(parts, "VPN")
+		}
+		if result.IPInfo.IsProxy {
+			parts = append(parts, "PROXY")
+		}
+		if result.IPInfo.IsTor {
+			parts = append(parts, "TOR")
+		}
+	}
+
+	// Tenant matches
+	if result.AzureTenant != nil && result.AzureTenant.Found {
+		parts = append(parts, "AZURE")
+	}
+	if result.AWSTenant != nil && result.AWSTenant.Found {
+		parts = append(parts, "AWS")
+	}
+	if result.GCPTenant != nil && result.GCPTenant.Found {
+		parts = append(parts, "GCP")
+	}
+
+	// Open ports
+	if result.Ports != nil && len(result.Ports.OpenPorts) > 0 {
+		ports := make([]string, len(result.Ports.OpenPorts))
+		for i, p := range result.Ports.OpenPorts {
+			ports[i] = fmt.Sprintf("%d", p.Port)
+		}
+		parts = append(parts, fmt.Sprintf("ports=%s", strings.Join(ports, ",")))
+	}
+
+	fmt.Fprintln(w, strings.Join(parts, " "))
+	return nil
 }
 
 func renderStyled(w io.Writer, result *lookup.Result) error {
@@ -209,6 +578,50 @@ func renderStyled(w io.Writer, result *lookup.Result) error {
 	// AWS Tenant
 	if result.AWSTenant != nil {
 		sb.WriteString(renderAWSTenant(result.AWSTenant))
+	}
+
+	// GCP Tenant
+	if result.GCPTenant != nil {
+		sb.WriteString(renderGCPTenant(result.GCPTenant))
+	}
+
+	// --- Active Scanning ---
+
+	// JARM TLS Fingerprint
+	if result.JARM != nil {
+		sb.WriteString(renderJARM(result.JARM))
+	}
+
+	// UDP Scan
+	if result.UDPScan != nil {
+		sb.WriteString(renderUDPScan(result.UDPScan))
+	}
+
+	// --- Additional Threat Intel ---
+
+	// AlienVault OTX
+	if result.AlienVault != nil {
+		sb.WriteString(renderAlienVault(result.AlienVault))
+	}
+
+	// Censys
+	if result.Censys != nil {
+		sb.WriteString(renderCensys(result.Censys))
+	}
+
+	// IPinfo.io
+	if result.IPInfo != nil {
+		sb.WriteString(renderIPInfo(result.IPInfo))
+	}
+
+	// ThreatFox
+	if result.ThreatFox != nil {
+		sb.WriteString(renderThreatFox(result.ThreatFox))
+	}
+
+	// Tech Stack
+	if result.TechStack != nil && len(result.TechStack.Technologies) > 0 {
+		sb.WriteString(renderTechStack(result.TechStack))
 	}
 
 	// Errors
@@ -1008,6 +1421,448 @@ func renderAWSTenant(aw *lookup.AWSTenantResult) string {
 	}
 
 	sb.WriteString(renderKVTable(rows))
+	return sb.String()
+}
+
+func renderGCPTenant(gcp *lookup.GCPTenantResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("GCP Tenant Lookup"))
+	sb.WriteString("\n")
+
+	if !gcp.Found {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(
+			dimStyle.Render("Not found in any accessible GCP project"),
+		))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	badge := cloudBadge.Background(lipgloss.Color("#4285F4")).Render("FOUND IN GCP")
+	sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(badge))
+	sb.WriteString("\n\n")
+
+	rows := [][]string{}
+	if gcp.ProjectID != "" {
+		rows = append(rows, []string{"Project", gcp.ProjectID})
+	}
+	if gcp.ResourceType != "" {
+		rows = append(rows, []string{"Resource Type", gcp.ResourceType})
+	}
+	if gcp.IPName != "" {
+		rows = append(rows, []string{"IP Name", gcp.IPName})
+	}
+	if gcp.IPType != "" {
+		rows = append(rows, []string{"IP Type", gcp.IPType})
+	}
+	if gcp.Status != "" {
+		rows = append(rows, []string{"Status", gcp.Status})
+	}
+	if gcp.Scope != "" {
+		rows = append(rows, []string{"Scope", gcp.Scope})
+	}
+	if gcp.Region != "" {
+		rows = append(rows, []string{"Region", gcp.Region})
+	}
+	if gcp.Zone != "" {
+		rows = append(rows, []string{"Zone", gcp.Zone})
+	}
+	if gcp.InstanceName != "" {
+		rows = append(rows, []string{"Instance", gcp.InstanceName})
+	}
+	if gcp.PublicIP != "" {
+		rows = append(rows, []string{"Public IP", gcp.PublicIP})
+	}
+	if gcp.PrivateIP != "" {
+		rows = append(rows, []string{"Private IP", gcp.PrivateIP})
+	}
+	if gcp.Network != "" {
+		rows = append(rows, []string{"Network", gcp.Network})
+	}
+	if gcp.Subnet != "" {
+		rows = append(rows, []string{"Subnet", gcp.Subnet})
+	}
+	if gcp.AttachedTo != "" {
+		rows = append(rows, []string{"Attached To", gcp.AttachedTo})
+	}
+
+	sb.WriteString(renderKVTable(rows))
+	return sb.String()
+}
+
+func renderJARM(j *lookup.JARMResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("JARM TLS Fingerprint"))
+	sb.WriteString("\n")
+
+	if j.Fingerprint == "" || j.Fingerprint == strings.Repeat("0", 62) {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(dimStyle.Render("No JARM fingerprint (no TLS response)")))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	rows := [][]string{
+		{"Fingerprint", j.Fingerprint},
+	}
+	if j.Port != 0 {
+		rows = append(rows, []string{"Port", fmt.Sprintf("%d", j.Port)})
+	}
+
+	sb.WriteString(renderKVTable(rows))
+	return sb.String()
+}
+
+func renderUDPScan(u *lookup.UDPScanResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("UDP Scan"))
+	sb.WriteString("\n")
+
+	if len(u.OpenPorts) == 0 {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(dimStyle.Render("No UDP services responded")))
+		sb.WriteString("\n")
+		if u.ScanTime != "" {
+			sb.WriteString(fieldRow("Scan Time", u.ScanTime))
+		}
+		return sb.String()
+	}
+
+	t := table.New().
+		Border(lipgloss.NormalBorder()).
+		BorderStyle(borderStyle).
+		Headers("Port", "Service", "Response", "Amplification").
+		StyleFunc(func(row, col int) lipgloss.Style {
+			s := lipgloss.NewStyle().Padding(0, 1)
+			if row == table.HeaderRow {
+				return s.Foreground(colorSecondary).Bold(true)
+			}
+			if row%2 == 0 {
+				return s.Foreground(colorValue)
+			}
+			return s.Foreground(colorLabel)
+		}).
+		Width(80)
+
+	for _, port := range u.OpenPorts {
+		amp := ""
+		if port.Amplification {
+			amp = dangerBadge.Render(port.AmpFactor)
+		}
+		t.Row(
+			fmt.Sprintf("%d", port.Port),
+			port.Service,
+			fmt.Sprintf("%d bytes", port.ResponseSize),
+			amp,
+		)
+	}
+
+	sb.WriteString(lipgloss.NewStyle().PaddingLeft(2).Render(t.Render()))
+	sb.WriteString("\n")
+
+	if u.ScanTime != "" {
+		sb.WriteString(fieldRow("Scan Time", u.ScanTime))
+	}
+
+	return sb.String()
+}
+
+func renderAlienVault(av *lookup.AlienVaultResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("AlienVault OTX"))
+	sb.WriteString("\n")
+
+	if av.PulseCount == 0 {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(dimStyle.Render("No threat pulses found")))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	var pulseBadge string
+	switch {
+	case av.PulseCount >= 10:
+		pulseBadge = dangerBadge.Render(fmt.Sprintf("%d pulses", av.PulseCount))
+	case av.PulseCount >= 3:
+		pulseBadge = warnBadge.Render(fmt.Sprintf("%d pulses", av.PulseCount))
+	default:
+		pulseBadge = successBadge.Render(fmt.Sprintf("%d pulses", av.PulseCount))
+	}
+
+	rows := [][]string{
+		{"Pulses", pulseBadge},
+	}
+	if av.Reputation != 0 {
+		rows = append(rows, []string{"Reputation", fmt.Sprintf("%d", av.Reputation)})
+	}
+	if av.Country != "" {
+		rows = append(rows, []string{"Country", av.Country})
+	}
+	if av.ASN != "" {
+		rows = append(rows, []string{"ASN", av.ASN})
+	}
+	if len(av.Tags) > 0 {
+		tags := strings.Join(av.Tags, ", ")
+		if len(tags) > 60 {
+			tags = tags[:60] + "..."
+		}
+		rows = append(rows, []string{"Tags", tags})
+	}
+	if av.Link != "" {
+		rows = append(rows, []string{"Link", av.Link})
+	}
+
+	sb.WriteString(renderKVTable(rows))
+
+	// Show top pulses
+	if len(av.Pulses) > 0 {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(1).PaddingTop(1).Bold(true).Foreground(colorLabel).Render("Recent Pulses"))
+		sb.WriteString("\n")
+		limit := len(av.Pulses)
+		if limit > 5 {
+			limit = 5
+		}
+		for _, pulse := range av.Pulses[:limit] {
+			name := pulse.Name
+			if len(name) > 60 {
+				name = name[:60] + "..."
+			}
+			sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(
+				fmt.Sprintf("%s  %s", valueStyle.Render(name), dimStyle.Render(pulse.Created)),
+			))
+			sb.WriteString("\n")
+		}
+		if len(av.Pulses) > 5 {
+			sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(
+				dimStyle.Render(fmt.Sprintf("... and %d more", len(av.Pulses)-5)),
+			))
+			sb.WriteString("\n")
+		}
+	}
+
+	return sb.String()
+}
+
+func renderCensys(c *lookup.CensysResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("Censys"))
+	sb.WriteString("\n")
+
+	if c.Services == 0 && len(c.OpenPorts) == 0 {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(dimStyle.Render("No data found in Censys")))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	rows := [][]string{
+		{"Services", fmt.Sprintf("%d", c.Services)},
+	}
+	if c.OperatingSystem != "" {
+		rows = append(rows, []string{"OS", c.OperatingSystem})
+	}
+	if c.ASN != 0 {
+		rows = append(rows, []string{"ASN", fmt.Sprintf("AS%d (%s)", c.ASN, c.ASName)})
+	}
+	if c.Country != "" {
+		rows = append(rows, []string{"Country", c.Country})
+	}
+	if c.LastUpdated != "" {
+		rows = append(rows, []string{"Last Updated", c.LastUpdated})
+	}
+	if c.Link != "" {
+		rows = append(rows, []string{"Link", c.Link})
+	}
+
+	sb.WriteString(renderKVTable(rows))
+
+	if len(c.OpenPorts) > 0 {
+		t := table.New().
+			Border(lipgloss.NormalBorder()).
+			BorderStyle(borderStyle).
+			Headers("Port", "Protocol", "Service", "Certificate").
+			StyleFunc(func(row, col int) lipgloss.Style {
+				s := lipgloss.NewStyle().Padding(0, 1)
+				if row == table.HeaderRow {
+					return s.Foreground(colorSecondary).Bold(true)
+				}
+				if row%2 == 0 {
+					return s.Foreground(colorValue)
+				}
+				return s.Foreground(colorLabel)
+			}).
+			Width(80)
+
+		for _, svc := range c.OpenPorts {
+			cert := svc.Certificate
+			if len(cert) > 30 {
+				cert = cert[:30] + "..."
+			}
+			t.Row(
+				fmt.Sprintf("%d", svc.Port),
+				svc.Protocol,
+				svc.ServiceName,
+				cert,
+			)
+		}
+
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(2).Render(t.Render()))
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
+func renderIPInfo(info *lookup.IPInfoResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("IPinfo.io"))
+	sb.WriteString("\n")
+
+	rows := [][]string{}
+	if info.Hostname != "" {
+		rows = append(rows, []string{"Hostname", info.Hostname})
+	}
+	if info.Org != "" {
+		rows = append(rows, []string{"Organization", info.Org})
+	}
+	if info.City != "" || info.Region != "" {
+		loc := info.City
+		if info.Region != "" {
+			if loc != "" {
+				loc += ", "
+			}
+			loc += info.Region
+		}
+		if info.Country != "" {
+			loc += " (" + info.Country + ")"
+		}
+		rows = append(rows, []string{"Location", loc})
+	}
+	if info.Timezone != "" {
+		rows = append(rows, []string{"Timezone", info.Timezone})
+	}
+
+	// Privacy flags
+	privacyFlags := []string{}
+	if info.IsVPN {
+		privacyFlags = append(privacyFlags, dangerBadge.Render("VPN"))
+	}
+	if info.IsProxy {
+		privacyFlags = append(privacyFlags, dangerBadge.Render("PROXY"))
+	}
+	if info.IsTor {
+		privacyFlags = append(privacyFlags, dangerBadge.Render("TOR"))
+	}
+	if info.IsRelay {
+		privacyFlags = append(privacyFlags, warnBadge.Render("RELAY"))
+	}
+	if info.IsHosting {
+		privacyFlags = append(privacyFlags, dimStyle.Render("HOSTING"))
+	}
+	if len(privacyFlags) > 0 {
+		rows = append(rows, []string{"Privacy", strings.Join(privacyFlags, " ")})
+	}
+	if info.PrivacyService != "" {
+		rows = append(rows, []string{"Service", info.PrivacyService})
+	}
+
+	if len(rows) == 0 {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(dimStyle.Render("No data from IPinfo")))
+		sb.WriteString("\n")
+	} else {
+		sb.WriteString(renderKVTable(rows))
+	}
+
+	return sb.String()
+}
+
+func renderThreatFox(tf *lookup.ThreatFoxResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("ThreatFox (abuse.ch)"))
+	sb.WriteString("\n")
+
+	if tf.IOCCount == 0 {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(dimStyle.Render("No IOCs found in ThreatFox")))
+		sb.WriteString("\n")
+		return sb.String()
+	}
+
+	iocBadge := dangerBadge.Render(fmt.Sprintf("%d IOCs", tf.IOCCount))
+	rows := [][]string{
+		{"IOCs", iocBadge},
+	}
+	if len(tf.MalwareFamilies) > 0 {
+		rows = append(rows, []string{"Malware", dangerBadge.Render(strings.Join(tf.MalwareFamilies, ", "))})
+	}
+	if len(tf.ThreatTypes) > 0 {
+		rows = append(rows, []string{"Threat Types", strings.Join(tf.ThreatTypes, ", ")})
+	}
+	if tf.Link != "" {
+		rows = append(rows, []string{"Link", tf.Link})
+	}
+
+	sb.WriteString(renderKVTable(rows))
+
+	// Show top IOCs
+	if len(tf.IOCs) > 0 {
+		sb.WriteString(lipgloss.NewStyle().PaddingLeft(1).PaddingTop(1).Bold(true).Foreground(colorLabel).Render("IOC Details"))
+		sb.WriteString("\n")
+		limit := len(tf.IOCs)
+		if limit > 5 {
+			limit = 5
+		}
+		for _, ioc := range tf.IOCs[:limit] {
+			line := fmt.Sprintf("%s  %s  conf:%d  %s",
+				dangerBadge.Render(ioc.Malware),
+				dimStyle.Render(ioc.Type),
+				ioc.Confidence,
+				dimStyle.Render(ioc.FirstSeen),
+			)
+			sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(line))
+			sb.WriteString("\n")
+		}
+		if len(tf.IOCs) > 5 {
+			sb.WriteString(lipgloss.NewStyle().PaddingLeft(3).Render(
+				dimStyle.Render(fmt.Sprintf("... and %d more", len(tf.IOCs)-5)),
+			))
+			sb.WriteString("\n")
+		}
+	}
+
+	return sb.String()
+}
+
+func renderTechStack(ts *lookup.TechStackResult) string {
+	var sb strings.Builder
+	sb.WriteString(sectionHeaderStyle.Render("Tech Stack Detection"))
+	sb.WriteString("\n")
+
+	if ts.URL != "" {
+		sb.WriteString(fieldRow("URL", ts.URL))
+	}
+
+	t := table.New().
+		Border(lipgloss.NormalBorder()).
+		BorderStyle(borderStyle).
+		Headers("Technology", "Categories", "Version").
+		StyleFunc(func(row, col int) lipgloss.Style {
+			s := lipgloss.NewStyle().Padding(0, 1)
+			if row == table.HeaderRow {
+				return s.Foreground(colorSecondary).Bold(true)
+			}
+			if row%2 == 0 {
+				return s.Foreground(colorValue)
+			}
+			return s.Foreground(colorLabel)
+		}).
+		Width(80)
+
+	for _, tech := range ts.Technologies {
+		cats := strings.Join(tech.Categories, ", ")
+		if len(cats) > 30 {
+			cats = cats[:30] + "..."
+		}
+		t.Row(tech.Name, cats, tech.Version)
+	}
+
+	sb.WriteString(lipgloss.NewStyle().PaddingLeft(2).Render(t.Render()))
+	sb.WriteString("\n")
+
 	return sb.String()
 }
 

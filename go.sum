@@ -126,6 +126,8 @@ github.com/projectdiscovery/retryabledns v1.0.114 h1:COyNKzhA7oa3C/1639WRXeXsKrU
 github.com/projectdiscovery/retryabledns v1.0.114/go.mod h1:+DyanDr8naxQ2dRO9c4Ezo3NHHXhz8L0tTSRYWhiwyA=
 github.com/projectdiscovery/utils v0.10.0 h1:E3nMm0h3LWt2bbnpRd8Whyj/y0DrMJKYx2zV8gqFDF0=
 github.com/projectdiscovery/utils v0.10.0/go.mod h1:FL0cQdg3oBMtJdmbBrfLd5i73syNxpkbKO9tivQ0+rI=
+github.com/projectdiscovery/wappalyzergo v0.2.75 h1:ScmpgoYuIzERh4lJpjWPPY89PUWbhUu6vFbCYAr0kWc=
+github.com/projectdiscovery/wappalyzergo v0.2.75/go.mod h1:hRsnKNleH693FFJsBOD5NMUDbxw/Q94f0Oq2OV04Q6M=
 github.com/rivo/uniseg v0.4.7 h1:WUdvkW8uEhrYfLC4ZzdpI2ztxP1I582+49Oc5Mq64VQ=
 github.com/rivo/uniseg v0.4.7/go.mod h1:FN3SvrM+Zdj16jyLfmOkMNblXMcoc8DfTHruCPUcx88=
 github.com/rogpeppe/go-internal v1.12.0 h1:exVL4IDcn6na9z1rAb56Vxr+CgyK3nn3O+epU5NdKM8=
