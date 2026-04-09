@@ -8,9 +8,28 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
+// rdapEndpoint defines an RIR's RDAP service.
+type rdapEndpoint struct {
+	Name   string // RIR name (e.g., "ARIN")
+	Region string // coverage region
+	URL    string // RDAP base URL (append IP)
+}
+
+// rdapFallbackEndpoints lists all five RIR RDAP services for fallback.
+var rdapFallbackEndpoints = []rdapEndpoint{
+	{Name: "ARIN", Region: "North America", URL: "https://rdap.arin.net/registry/ip/"},
+	{Name: "RIPE", Region: "Europe / Middle East", URL: "https://rdap.db.ripe.net/ip/"},
+	{Name: "APNIC", Region: "Asia Pacific", URL: "https://rdap.apnic.net/ip/"},
+	{Name: "LACNIC", Region: "Latin Am. / Caribbean", URL: "https://rdap.lacnic.net/rdap/ip/"},
+	{Name: "AFRINIC", Region: "Africa", URL: "https://rdap.afrinic.net/rdap/ip/"},
+}
+
 // RDAP queries the RDAP service for IP registration info.
+// Uses the IANA RDAP bootstrap (rdap.org) which auto-redirects to the correct
+// RIR. Falls back to trying each RIR directly if the bootstrap is unavailable.
 type RDAP struct {
 	result *RDAPResult
 }
@@ -22,27 +41,26 @@ func NewRDAP() *RDAP {
 func (r *RDAP) Name() string { return "rdap" }
 
 func (r *RDAP) Lookup(ctx context.Context, ip net.IP) error {
-	url := fmt.Sprintf("https://rdap.arin.net/registry/ip/%s", ip.String())
+	ipStr := ip.String()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Accept", "application/rdap+json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("RDAP request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("RDAP returned status %d", resp.StatusCode)
+	// Build an HTTP client that follows redirects (IANA bootstrap redirects to the correct RIR).
+	client := &http.Client{
+		Timeout: 15 * time.Second,
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// Primary: IANA RDAP bootstrap — auto-redirects to the correct RIR.
+	body, source, err := r.queryRDAP(ctx, client, "https://rdap.org/ip/"+ipStr, "IANA bootstrap")
 	if err != nil {
-		return err
+		// Fallback: try each RIR endpoint directly.
+		for _, ep := range rdapFallbackEndpoints {
+			body, source, err = r.queryRDAP(ctx, client, ep.URL+ipStr, ep.Name)
+			if err == nil {
+				break
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("RDAP: all endpoints failed for %s: %w", ipStr, err)
+		}
 	}
 
 	var rdapResp rdapResponse
@@ -56,6 +74,7 @@ func (r *RDAP) Lookup(ctx context.Context, ip net.IP) error {
 		StartAddr: rdapResp.StartAddress,
 		EndAddr:   rdapResp.EndAddress,
 		Type:      rdapResp.Type,
+		Source:    source,
 	}
 
 	if len(rdapResp.CIDR0Cidrs) > 0 {
@@ -104,7 +123,80 @@ func (r *RDAP) Lookup(ctx context.Context, ip net.IP) error {
 		r.result.Country = rdapResp.Country
 	}
 
+	// Try to detect the RIR source from the RDAP port43 or links if bootstrap was used.
+	if r.result.Source == "IANA bootstrap" {
+		if detected := detectRIRFromResponse(rdapResp); detected != "" {
+			r.result.Source = detected
+		}
+	}
+
 	return nil
+}
+
+// queryRDAP performs a single RDAP HTTP request and returns the body on success.
+func (r *RDAP) queryRDAP(ctx context.Context, client *http.Client, url, source string) ([]byte, string, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	req.Header.Set("Accept", "application/rdap+json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("status %d from %s", resp.StatusCode, source)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return body, source, nil
+}
+
+// detectRIRFromResponse infers the RIR name from RDAP response metadata.
+func detectRIRFromResponse(resp rdapResponse) string {
+	// Check port43 field (whois server).
+	port43Lower := strings.ToLower(resp.Port43)
+	for _, kv := range []struct {
+		substr string
+		rir    string
+	}{
+		{"arin", "ARIN"},
+		{"ripe", "RIPE"},
+		{"apnic", "APNIC"},
+		{"lacnic", "LACNIC"},
+		{"afrinic", "AFRINIC"},
+	} {
+		if strings.Contains(port43Lower, kv.substr) {
+			return kv.rir
+		}
+	}
+
+	// Check links for RIR domain hints.
+	for _, link := range resp.Links {
+		href := strings.ToLower(link.Href)
+		for _, kv := range []struct {
+			substr string
+			rir    string
+		}{
+			{"arin.net", "ARIN"},
+			{"ripe.net", "RIPE"},
+			{"apnic.net", "APNIC"},
+			{"lacnic.net", "LACNIC"},
+			{"afrinic.net", "AFRINIC"},
+		} {
+			if strings.Contains(href, kv.substr) {
+				return kv.rir
+			}
+		}
+	}
+	return ""
 }
 
 func (r *RDAP) Apply(result *Result) {
@@ -118,9 +210,11 @@ type rdapResponse struct {
 	StartAddress string       `json:"startAddress"`
 	EndAddress   string       `json:"endAddress"`
 	Country      string       `json:"country"`
+	Port43       string       `json:"port43"`
 	Entities     []rdapEntity `json:"entities"`
 	Events       []rdapEvent  `json:"events"`
 	CIDR0Cidrs   []rdapCIDR   `json:"cidr0_cidrs"`
+	Links        []rdapLink   `json:"links"`
 }
 
 type rdapEntity struct {
@@ -139,6 +233,12 @@ type rdapCIDR struct {
 	V4Prefix string `json:"v4prefix"`
 	V6Prefix string `json:"v6prefix"`
 	Length   int    `json:"length"`
+}
+
+type rdapLink struct {
+	Href string `json:"href"`
+	Rel  string `json:"rel"`
+	Type string `json:"type"`
 }
 
 func extractAbuseEmail(entity rdapEntity) string {

@@ -21,7 +21,7 @@ type Result struct {
 	// Forward DNS recon (record queries on PTR hostnames)
 	ForwardDNS *ForwardDNSResult `json:"forward_dns,omitempty"`
 
-	// RDAP / ARIN Whois
+	// RDAP registration (all 5 RIRs via IANA bootstrap)
 	RDAP *RDAPResult `json:"rdap,omitempty"`
 
 	// ASN information
@@ -75,6 +75,7 @@ type RDAPResult struct {
 	Type       string `json:"type,omitempty"`
 	AbuseEmail string `json:"abuse_email,omitempty"`
 	UpdatedAt  string `json:"updated_at,omitempty"`
+	Source     string `json:"source,omitempty"` // RIR that served the response (e.g., "ARIN", "RIPE")
 }
 
 type CloudResult struct {

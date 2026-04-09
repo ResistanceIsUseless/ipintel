@@ -259,6 +259,7 @@ func renderRDAP(r *lookup.RDAPResult) string {
 	addRow("Organization", r.OrgName)
 	addRow("Country", r.Country)
 	addRow("Type", r.Type)
+	addRow("RIR", r.Source)
 	addRow("Abuse Contact", r.AbuseEmail)
 	addRow("Last Updated", r.UpdatedAt)
 
